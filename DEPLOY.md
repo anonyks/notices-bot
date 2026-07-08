@@ -1,51 +1,37 @@
-# Deploy to Render.com (Free 24/7)
+# deploy to render (free 24/7)
 
-## Quick Setup (5 minutes)
+## 1. push to github
 
-### 1. Push to GitHub
 ```bash
-cd /Users/admin/Documents/github/ioe_result_bot
-git init
-git add .
-git commit -m "IOE Result Bot"
-git branch -M main
 git remote add origin https://github.com/YOUR_USERNAME/ioe_result_bot.git
 git push -u origin main
 ```
 
-### 2. Deploy on Render
-1. Go to https://render.com
-2. Sign up (free, use GitHub)
-3. Click "New +" → "Blueprint"
-4. Connect your GitHub repo `ioe_result_bot`
-5. Render auto-detects `render.yaml`
-6. Click "Apply"
+## 2. deploy
 
-### 3. Add Environment Variables
-In Render dashboard:
-1. Go to your service
-2. Click "Environment"
-3. Add these:
-   - `DISCORD_WEBHOOK1` = your webhook URL
-   - `DISCORD_WEBHOOK2` = your webhook URL
-   - `TELEGRAM_TOKEN` = your bot token
-   - `TELEGRAM_CHAT_ID` = your chat ID
+- go to render.com
+- sign up (use github)
+- new + > blueprint
+- pick your repo
+- click apply
 
-4. Click "Save Changes"
-5. Bot auto-redeploys!
+## 3. add tokens
 
-### Done! ✅
-Bot runs 24/7 for free (750 hours/month = 31 days)
+in render dashboard:
+- environment tab
+- add:
+  - DISCORD_WEBHOOK1
+  - DISCORD_WEBHOOK2
+  - TELEGRAM_TOKEN
+  - TELEGRAM_CHAT_ID
+- save
 
-## Check Logs
-- Click "Logs" tab in Render dashboard
-- See bot output live
+done! bot runs 24/7
 
-## Restart Bot
-- Click "Manual Deploy" → "Clear build cache & deploy"
+## check logs
 
-## Local Testing First
-```bash
-python3 bot.py
-```
-Make sure it works before deploying!
+logs tab in render
+
+## restart
+
+manual deploy > clear cache
