@@ -164,7 +164,6 @@ async def send_telegram(title, url, medias):
     except:
         pass
 
-# send to messenger
 # send msg to telegram
 def tg_send(txt):
     try:
