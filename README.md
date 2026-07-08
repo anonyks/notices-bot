@@ -1,6 +1,6 @@
 # notices bot
 
-sends ioe exam notices to discord and telegram
+sends notices to discord and telegram
 
 ## setup
 
