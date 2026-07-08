@@ -343,7 +343,9 @@ async def run():
                     if n['link'] not in posted:
                         print(f"[MONITOR] NEW: {n['title']}")
                         await send_discord(n['title'], n['link'], n.get('medias'))
-                        await send_telegram(n['title'], n['link'], n.get('medias'))                        await send_messenger(n['title'], n['link'], n.get('medias'))                        save(n['link'])
+                        await send_telegram(n['title'], n['link'], n.get('medias'))
+                        await send_messenger(n['title'], n['link'], n.get('medias'))
+                        save(n['link'])
                         posted.append(n['link'])
             await asyncio.sleep(300)
         except Exception as e:
