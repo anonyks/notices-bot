@@ -3,7 +3,7 @@
 ## 1. push to github
 
 ```bash
-git remote add origin https://github.com/YOUR_USERNAME/ioe_result_bot.git
+git remote add origin https://github.com/YOUR_USERNAME/notices-bot.git
 git push -u origin main
 ```
 

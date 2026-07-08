@@ -1,4 +1,4 @@
-# ioe result bot
+# notices bot
 
 sends ioe exam notices to discord and telegram
 

@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: ioe-notices-bot
+    name: notices-bot
     env: docker
     plan: free
     envVars:
