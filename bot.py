@@ -1,6 +1,21 @@
 import os, requests, asyncio
 from bs4 import BeautifulSoup
 from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
+
+# simple health check server
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+    def log_message(self, format, *args):
+        pass
+
+def run_server():
+    port = int(os.getenv('PORT', 10000))
+    HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 # change to script directory
 script_dir = Path(__file__).parent
@@ -309,6 +324,9 @@ async def run():
 # run both
 async def main():
     await asyncio.gather(run(), poll())
+
+# start health check server
+Thread(target=run_server, daemon=True).start()
 
 print('='*50)
 print('NOTICES BOT STARTING...')

@@ -1,8 +1,9 @@
 services:
-  - type: worker
+  - type: web
     name: notices-bot
     env: docker
     plan: free
+    healthCheckPath: /
     envVars:
       - key: DISCORD_WEBHOOK1
         sync: false
