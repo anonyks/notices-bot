@@ -37,6 +37,8 @@ w1 = os.getenv('DISCORD_WEBHOOK1', '')
 w2 = os.getenv('DISCORD_WEBHOOK2', '')
 tg_token = os.getenv('TELEGRAM_TOKEN', '')
 tg_chat = os.getenv('TELEGRAM_CHAT_ID', '')
+fb_token = os.getenv('FB_PAGE_TOKEN', '')
+fb_recipient = os.getenv('FB_RECIPIENT_ID', '')
 
 if not tg_token or not tg_chat:
     print('ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set!')
@@ -164,6 +166,33 @@ async def send_telegram(title, url, medias):
     except:
         pass
 
+# send to messenger
+async def send_messenger(title, url, medias):
+    if not fb_token or not fb_recipient:
+        return
+    try:
+        msg = f"🎤 {title}\n\n🔗 {url}"
+        pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else get_pdfs(url)
+        
+        api = f"https://graph.facebook.com/v20.0/me/messages?access_token={fb_token}"
+        
+        # send text
+        requests.post(api, json={'recipient': {'id': fb_recipient}, 'message': {'text': msg}}, timeout=30)
+        print('messenger: sent')
+        
+        # send pdfs
+        if pdfs:
+            for p in pdfs[:3]:
+                try:
+                    requests.post(api, json={
+                        'recipient': {'id': fb_recipient},
+                        'message': {'attachment': {'type': 'file', 'payload': {'url': p}}}
+                    }, timeout=30)
+                except:
+                    pass
+    except:
+        pass
+
 # send msg to telegram
 def tg_send(txt):
     try:
@@ -221,6 +250,7 @@ async def handle_cmd(msg):
         if content:
             await send_discord("info_s", content, None)
             await send_telegram("info_s", content, None)
+            await send_messenger("info_s", content, None)
             tg_send('Posted!')
     
     # handle files/photos with /post
@@ -313,8 +343,7 @@ async def run():
                     if n['link'] not in posted:
                         print(f"[MONITOR] NEW: {n['title']}")
                         await send_discord(n['title'], n['link'], n.get('medias'))
-                        await send_telegram(n['title'], n['link'], n.get('medias'))
-                        save(n['link'])
+                        await send_telegram(n['title'], n['link'], n.get('medias'))                        await send_messenger(n['title'], n['link'], n.get('medias'))                        save(n['link'])
                         posted.append(n['link'])
             await asyncio.sleep(300)
         except Exception as e:
