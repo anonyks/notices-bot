@@ -144,7 +144,7 @@ async def send_telegram(title, url, medias):
     if not tg_token:
         return
     try:
-        msg = f"{title}\n\n{url}"
+        msg = f"🎤 {title}\n\n🔗 {url}"
         pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else get_pdfs(url)
         
         if pdfs:
@@ -237,7 +237,7 @@ async def handle_cmd(msg):
                     if w:
                         try:
                             fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': caption}, files={'file': ('file.pdf', fr.content)}, timeout=30)
+                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': ('file.pdf', fr.content)}, timeout=30)
                         except:
                             pass
         elif 'photo' in msg:
@@ -252,7 +252,7 @@ async def handle_cmd(msg):
                     if w:
                         try:
                             fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': caption}, files={'file': ('image.jpg', fr.content)}, timeout=30)
+                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': ('image.jpg', fr.content)}, timeout=30)
                         except:
                             pass
         tg_send('Posted!')
