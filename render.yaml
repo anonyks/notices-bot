@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: ioe-result-bot
+    env: docker
+    plan: free
+    envVars:
+      - key: DISCORD_WEBHOOK1
+        sync: false
+      - key: DISCORD_WEBHOOK2
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
