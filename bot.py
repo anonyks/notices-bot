@@ -180,7 +180,7 @@ async def handle_cmd(msg):
     txt = msg.get('text', '')
     
     if txt == '/start':
-        tg_send('IOE Result Bot\n\n/status - Check status\n/latest - Latest notices\n/stop - Stop notifications\n/post - Send custom notice')
+        tg_send('Notices Bot\n\n/status - Check status\n/latest - Latest notices\n/stop - Stop notifications\n/post - Send custom notice')
     
     elif txt == '/status':
         status = 'ON' if notify_on else 'OFF'
@@ -311,6 +311,6 @@ async def main():
     await asyncio.gather(run(), poll())
 
 print('='*50)
-print('IOE RESULT BOT STARTING...')
+print('NOTICES BOT STARTING...')
 print('='*50)
 asyncio.run(main())
