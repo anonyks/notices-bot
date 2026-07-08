@@ -1,6 +1,6 @@
 # notices bot
 
-sends notices to discord, telegram, and messenger
+sends notices to discord and telegram
 
 ## setup
 
@@ -15,8 +15,6 @@ DISCORD_WEBHOOK1=your_webhook
 DISCORD_WEBHOOK2=your_webhook
 TELEGRAM_TOKEN=your_token
 TELEGRAM_CHAT_ID=your_chat_id
-FB_PAGE_TOKEN=your_fb_token (optional)
-FB_RECIPIENT_ID=your_recipient_id (optional)
 ```
 
 run:
@@ -37,13 +35,6 @@ telegram:
 - message your bot
 - go to: api.telegram.org/botTOKEN/getUpdates
 - copy chat id
-
-messenger (optional):
-- create facebook page
-- create app at developers.facebook.com
-- add messenger product
-- generate page access token
-- get recipient PSID by messaging your page
 
 ## commands
 
