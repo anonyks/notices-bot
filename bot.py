@@ -349,6 +349,12 @@ async def run():
     # loop
     while True:
         try:
+            # self-ping to keep render awake
+            try:
+                requests.get('https://notices-bot.onrender.com/', timeout=5)
+            except:
+                pass
+            
             if notify_on:
                 for n in get_exam() + get_tcioe():
                     if n['link'] not in posted:
