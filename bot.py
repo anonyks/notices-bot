@@ -15,6 +15,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_server():
     port = int(os.getenv('PORT', 10000))
+    print(f'[HEALTH] Starting health check server on port {port}...')
     HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 # change to script directory
@@ -297,12 +298,16 @@ async def run():
     
     # first run
     if not posted:
-        print('[MONITOR] First run, saving existing...')
-        for n in get_exam() + get_tcioe():
-            save(n['link'])
-        posted = get_saved()
-        print(f'[MONITOR] Saved {len(posted)} - wont post old notices')
-        await asyncio.sleep(5)  # short wait
+        try:
+            print('[MONITOR] First run, saving existing...')
+            for n in get_exam() + get_tcioe():
+                save(n['link'])
+            posted = get_saved()
+            print(f'[MONITOR] Saved {len(posted)} - wont post old notices')
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f'[MONITOR] First run error: {e}')
+            await asyncio.sleep(5)
     
     print('[MONITOR] Monitoring every 5 min...')
     # loop
