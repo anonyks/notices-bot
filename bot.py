@@ -77,7 +77,8 @@ def get_exam():
                 seen.add(h)
         print(f'exam: {len(notices)}')
         return notices
-    except:
+    except Exception as e:
+        print(f'exam error: {e}')
         return []
 
 # scrape tcioe api
@@ -94,7 +95,8 @@ def get_tcioe():
             })
         print(f'tcioe: {len(notices)}')
         return notices
-    except:
+    except Exception as e:
+        print(f'tcioe error: {e}')
         return []
 
 # get pdfs from page
@@ -266,9 +268,12 @@ async def poll():
     try:
         r = requests.get(f"https://api.telegram.org/bot{tg_token}/getUpdates", timeout=5)
         data = r.json()
-        if data.get('ok') and data.get('result'):
-            offset = data['result'][-1]['update_id'] + 1
-            print(f'[BOT] Cleared {len(data["result"])} old msgs')
+        if data.get('ok'):
+            if data.get('result'):
+                offset = data['result'][-1]['update_id'] + 1
+                print(f'[BOT] Cleared {len(data["result"])} old msgs')
+            else:
+                print('[BOT] No old messages')
         else:
             print(f'[BOT] API error: {data.get("description", "unknown")}')
     except Exception as e:
