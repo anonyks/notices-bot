@@ -101,6 +101,13 @@ def get_tcioe():
         if r.status_code != 200:
             print(f'tcioe: HTTP {r.status_code}')
             return []
+        
+        # check if response is valid json
+        content_type = r.headers.get('content-type', '')
+        if 'json' not in content_type.lower():
+            print(f'tcioe: Not JSON response (got {content_type})')
+            return []
+            
         d = r.json()
         notices = []
         for i in d.get('results', []):
