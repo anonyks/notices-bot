@@ -84,7 +84,11 @@ def get_exam():
 # scrape tcioe api
 def get_tcioe():
     try:
-        r = requests.get('https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at', timeout=10)
+        r = requests.get('https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at', 
+                        headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        if r.status_code != 200:
+            print(f'tcioe: HTTP {r.status_code}')
+            return []
         d = r.json()
         notices = []
         for i in d.get('results', []):
