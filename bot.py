@@ -1,4 +1,4 @@
-import os, requests, asyncio
+import os, requests, asyncio, random
 from bs4 import BeautifulSoup
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -84,30 +84,38 @@ def get_exam():
 # scrape tcioe api
 def get_tcioe():
     try:
+        # rotating proxies for tcioe
+        proxies_list = [
+            'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
+            'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
+            'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
+            'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
+            'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
+            'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
+            'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
+            'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
+            'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
+            'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
+            'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf'
+        ]
+        
+        # pick random proxy
+        proxy_str = random.choice(proxies_list)
+        host, port, user, pwd = proxy_str.split(':')
+        proxy = f'http://{user}:{pwd}@{host}:{port}'
+        
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1'
+            'Accept': 'application/json'
         }
+        
         r = requests.get('https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at', 
-                        headers=headers, timeout=10)
+                        headers=headers, proxies={'http': proxy, 'https': proxy}, timeout=15)
+        
         if r.status_code != 200:
             print(f'tcioe: HTTP {r.status_code}')
             return []
         
-        # check if response is valid json
-        content_type = r.headers.get('content-type', '')
-        if 'json' not in content_type.lower():
-            print(f'tcioe: Not JSON response (got {content_type})')
-            return []
-            
         d = r.json()
         notices = []
         for i in d.get('results', []):
