@@ -267,11 +267,12 @@ async def handle_cmd(msg):
             if file_info.get('ok'):
                 file_path = file_info['result']['file_path']
                 file_url = f"https://api.telegram.org/file/bot{tg_token}/{file_path}"
+                filename = file_path.split('/')[-1]  # extract original filename
                 for w in [w1, w2]:
                     if w:
                         try:
                             fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': ('file.pdf', fr.content)}, timeout=30)
+                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': (filename, fr.content)}, timeout=30)
                         except:
                             pass
         elif 'photo' in msg:
@@ -282,11 +283,12 @@ async def handle_cmd(msg):
             if file_info.get('ok'):
                 file_path = file_info['result']['file_path']
                 file_url = f"https://api.telegram.org/file/bot{tg_token}/{file_path}"
+                filename = file_path.split('/')[-1]  # extract original filename
                 for w in [w1, w2]:
                     if w:
                         try:
                             fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': ('image.jpg', fr.content)}, timeout=30)
+                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': (filename, fr.content)}, timeout=30)
                         except:
                             pass
         tg_send('Posted!')
