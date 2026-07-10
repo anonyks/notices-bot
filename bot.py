@@ -161,7 +161,9 @@ async def send_discord(title, url, medias):
                     try:
                         pr = requests.get(p, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
                         if pr.status_code == 200:
-                            fn = p.split('/')[-1] if p.split('/')[-1].endswith('.pdf') else 'file.pdf'
+                            fn = p.split('/')[-1]  # preserve original filename
+                            if not fn or '?' in fn:  # if no filename or has query params
+                                fn = 'file.pdf'
                             requests.post(w, data={'content': msg}, files={'file': (fn, pr.content)}, timeout=30)
                             print(f'discord: {fn}')
                             msg = ''
