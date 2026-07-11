@@ -10,12 +10,11 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
-MONITOR_INTERVAL = 300  # seconds between notice checks
-HTTP_TIMEOUT = 10
-POLL_TIMEOUT = 25
+# check every 10 min (was 5) so we use less Render bandwidth
+CHECK_EVERY = 600
 
 
-# Render/health probes hit this so the process looks alive
+# simple health check server for Render
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -32,7 +31,7 @@ def run_server():
     HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 
-# keep relative paths (posted.txt, .env) next to this script
+# keep files next to this script
 script_dir = Path(__file__).parent
 os.chdir(script_dir)
 load_dotenv()
@@ -41,7 +40,7 @@ w1 = (os.getenv('DISCORD_WEBHOOK1') or '').strip()
 w2 = (os.getenv('DISCORD_WEBHOOK2') or '').strip()
 tg_token = (os.getenv('TELEGRAM_TOKEN') or '').strip()
 tg_chat = (os.getenv('TELEGRAM_CHAT_ID') or '').strip()
-# self-ping URL to keep Render free tier from sleeping
+# self-ping so Render free tier doesnt sleep
 health_ping_url = (
     (os.getenv('HEALTH_PING_URL') or '').strip()
     or (os.getenv('RENDER_EXTERNAL_URL') or '').strip()
@@ -59,7 +58,7 @@ if not w1 and not w2:
 
 notify_on = True
 offset = 0
-http: httpx.AsyncClient | None = None
+http = None
 
 
 def get_saved():
@@ -101,7 +100,7 @@ async def get_exam():
         r = await http.get(
             'https://exam.ioe.tu.edu.np/notices',
             headers={'User-Agent': UA},
-            timeout=HTTP_TIMEOUT,
+            timeout=10,
         )
         r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
@@ -125,7 +124,7 @@ async def get_exam():
 async def get_tcioe():
     try:
         proxy = _proxy_url()
-        async with httpx.AsyncClient(proxy=proxy, timeout=15, verify=True) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
             r = await client.get(
                 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at',
                 headers={'User-Agent': UA, 'Accept': 'application/json'},
@@ -151,7 +150,7 @@ async def get_tcioe():
 
 async def get_pdfs(url):
     try:
-        r = await http.get(url, headers={'User-Agent': UA}, timeout=HTTP_TIMEOUT)
+        r = await http.get(url, headers={'User-Agent': UA}, timeout=10)
         r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
         pdfs = []
@@ -190,7 +189,7 @@ async def send_discord(title, url, medias):
                     except Exception as e:
                         print(f'discord file error: {e}')
             else:
-                await http.post(w, json={'content': msg}, timeout=HTTP_TIMEOUT)
+                await http.post(w, json={'content': msg}, timeout=10)
                 print('discord: sent')
         except Exception as e:
             print(f'discord error: {e}')
@@ -222,7 +221,7 @@ async def send_telegram(title, url, medias):
             await http.post(
                 f'https://api.telegram.org/bot{tg_token}/sendMessage',
                 data={'chat_id': tg_chat, 'text': msg},
-                timeout=HTTP_TIMEOUT,
+                timeout=10,
             )
             print('telegram: sent')
     except Exception as e:
@@ -234,7 +233,7 @@ async def tg_send(txt):
         await http.post(
             f'https://api.telegram.org/bot{tg_token}/sendMessage',
             data={'chat_id': tg_chat, 'text': txt},
-            timeout=HTTP_TIMEOUT,
+            timeout=10,
         )
         print('[BOT] << Sent reply')
     except Exception as e:
@@ -293,7 +292,7 @@ async def handle_cmd(msg):
             file_info = (await http.get(
                 f'https://api.telegram.org/bot{tg_token}/getFile',
                 params={'file_id': file_id},
-                timeout=HTTP_TIMEOUT,
+                timeout=10,
             )).json()
             if file_info.get('ok'):
                 file_path = file_info['result']['file_path']
@@ -340,8 +339,8 @@ async def poll():
         try:
             r = await http.get(
                 f'https://api.telegram.org/bot{tg_token}/getUpdates',
-                params={'offset': offset, 'timeout': POLL_TIMEOUT},
-                timeout=POLL_TIMEOUT + 10,
+                params={'offset': offset, 'timeout': 25},
+                timeout=35,
             )
             data = r.json()
             if data.get('ok'):
@@ -374,7 +373,7 @@ async def run():
             print(f'[MONITOR] First run error: {e}')
             await asyncio.sleep(5)
 
-    print('[MONITOR] Monitoring every 5 min...')
+    print('[MONITOR] Monitoring every 10 min...')
     while True:
         try:
             # self-ping to keep render awake
@@ -393,20 +392,20 @@ async def run():
                         await send_telegram(n['title'], n['link'], n.get('medias'))
                         save(n['link'])
                         posted.append(n['link'])
-            await asyncio.sleep(MONITOR_INTERVAL)
+            await asyncio.sleep(CHECK_EVERY)
         except Exception as e:
             print(f'[MONITOR] error: {e}')
-            await asyncio.sleep(MONITOR_INTERVAL)
+            await asyncio.sleep(CHECK_EVERY)
 
 
 async def main():
     global http
-    async with httpx.AsyncClient(follow_redirects=True, verify=True) as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         http = client
         await asyncio.gather(run(), poll())
 
 
-# health server in a side thread; monitor + telegram poll share the event loop
+# health server in background, then run monitor + telegram
 Thread(target=run_server, daemon=True).start()
 
 print('=' * 50)
