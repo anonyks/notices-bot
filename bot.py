@@ -1,43 +1,49 @@
-import os, requests, asyncio, random
-from bs4 import BeautifulSoup
+import os
+import asyncio
+import random
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
-# simple health check server
+import httpx
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
+
+
+# Render/health probes hit this so the process looks alive
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
+
     def log_message(self, format, *args):
         pass
+
 
 def run_server():
     port = int(os.getenv('PORT', 10000))
     print(f'[HEALTH] Starting health check server on port {port}...')
     HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
-# change to script directory
+
+# keep relative paths (posted.txt, .env) next to this script
 script_dir = Path(__file__).parent
 os.chdir(script_dir)
+load_dotenv()
 
-# load .env
-try:
-    with open('.env', 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and '=' in line and not line.startswith('#'):
-                k, v = line.split('=', 1)
-                os.environ[k.strip()] = v.strip()
-except Exception as e:
-    print(f'Warning: Could not load .env: {e}')
-
-# tokens
 w1 = os.getenv('DISCORD_WEBHOOK1', '')
 w2 = os.getenv('DISCORD_WEBHOOK2', '')
 tg_token = os.getenv('TELEGRAM_TOKEN', '')
 tg_chat = os.getenv('TELEGRAM_CHAT_ID', '')
+# self-ping URL to keep Render free tier from sleeping
+health_ping_url = (
+    os.getenv('HEALTH_PING_URL')
+    or os.getenv('RENDER_EXTERNAL_URL')
+    or 'https://notices-bot.onrender.com'
+)
 
 if not tg_token or not tg_chat:
     print('ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set!')
@@ -45,25 +51,53 @@ if not tg_token or not tg_chat:
     print(f'Chat: {tg_chat}')
     exit(1)
 
-# state
 notify_on = True
 offset = 0
+http: httpx.AsyncClient | None = None
 
-# get saved links
+
 def get_saved():
     try:
-        return open('posted.txt').read().splitlines()
-    except:
+        return Path('posted.txt').read_text().splitlines()
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f'posted.txt read error: {e}')
         return []
 
-# save link
-def save(link):
-    open('posted.txt', 'a').write(link + '\n')
 
-# scrape exam.ioe
-def get_exam():
+def save(link):
+    with open('posted.txt', 'a') as f:
+        f.write(link + '\n')
+
+
+# tcioe blocks direct requests; rotate through webshare proxies
+def _proxy_url():
+    proxies_list = [
+        'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
+        'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
+        'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
+        'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
+        'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
+        'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
+        'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
+        'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
+        'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
+        'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
+        'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf',
+    ]
+    host, port, user, pwd = random.choice(proxies_list).split(':')
+    return f'http://{user}:{pwd}@{host}:{port}'
+
+
+async def get_exam():
     try:
-        r = requests.get('https://exam.ioe.tu.edu.np/notices', headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        r = await http.get(
+            'https://exam.ioe.tu.edu.np/notices',
+            headers={'User-Agent': UA},
+            timeout=10,
+        )
+        r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
         notices = []
         seen = set()
@@ -81,48 +115,26 @@ def get_exam():
         print(f'exam error: {e}')
         return []
 
-# scrape tcioe api
-def get_tcioe():
+
+async def get_tcioe():
     try:
-        # rotating proxies for tcioe
-        proxies_list = [
-            'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
-            'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
-            'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
-            'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
-            'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
-            'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
-            'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
-            'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
-            'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
-            'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
-            'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf'
-        ]
-        
-        # pick random proxy
-        proxy_str = random.choice(proxies_list)
-        host, port, user, pwd = proxy_str.split(':')
-        proxy = f'http://{user}:{pwd}@{host}:{port}'
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-            'Accept': 'application/json'
-        }
-        
-        r = requests.get('https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at', 
-                        headers=headers, proxies={'http': proxy, 'https': proxy}, timeout=15)
-        
+        proxy = _proxy_url()
+        async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
+            r = await client.get(
+                'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at',
+                headers={'User-Agent': UA, 'Accept': 'application/json'},
+            )
         if r.status_code != 200:
             print(f'tcioe: HTTP {r.status_code}')
             return []
-        
+
         d = r.json()
         notices = []
         for i in d.get('results', []):
             notices.append({
                 'link': f"https://tcioe.edu.np/notices/{i.get('slug', i.get('uuid'))}",
                 'title': i.get('title', ''),
-                'medias': i.get('medias', [])
+                'medias': i.get('medias', []),
             })
         print(f'tcioe: {len(notices)}')
         return notices
@@ -130,10 +142,11 @@ def get_tcioe():
         print(f'tcioe error: {e}')
         return []
 
-# get pdfs from page
-def get_pdfs(url):
+
+async def get_pdfs(url):
     try:
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        r = await http.get(url, headers={'User-Agent': UA}, timeout=10)
+        r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
         pdfs = []
         for a in s.find_all('a', href=lambda x: x and ('.pdf' in str(x).lower() or '/medias/' in str(x))):
@@ -144,164 +157,166 @@ def get_pdfs(url):
                 if h not in pdfs:
                     pdfs.append(h)
         return pdfs
-    except:
+    except Exception as e:
+        print(f'get_pdfs error ({url}): {e}')
         return []
 
-# send to discord
+
 async def send_discord(title, url, medias):
     for w in [w1, w2]:
         if not w:
             continue
         try:
-            msg = f"{title}\n\n{url}"
-            pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else get_pdfs(url)
-            
+            msg = f'{title}\n\n{url}'
+            pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
+
             if pdfs:
                 for p in pdfs[:10]:
                     try:
-                        pr = requests.get(p, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+                        pr = await http.get(p, headers={'User-Agent': UA}, timeout=30)
                         if pr.status_code == 200:
-                            fn = p.split('/')[-1]  # preserve original filename
-                            if not fn or '?' in fn:  # if no filename or has query params
+                            fn = p.split('/')[-1]  # keep original filename/extension
+                            if not fn or '?' in fn:
                                 fn = 'file.pdf'
-                            requests.post(w, data={'content': msg}, files={'file': (fn, pr.content)}, timeout=30)
+                            await http.post(w, data={'content': msg}, files={'file': (fn, pr.content)}, timeout=30)
                             print(f'discord: {fn}')
                             msg = ''
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f'discord file error: {e}')
             else:
-                requests.post(w, json={'content': msg}, timeout=10)
+                await http.post(w, json={'content': msg}, timeout=10)
                 print('discord: sent')
-        except:
-            pass
+        except Exception as e:
+            print(f'discord error: {e}')
 
-# send to telegram
+
 async def send_telegram(title, url, medias):
     if not tg_token:
         return
     try:
-        msg = f"🎤 {title}\n\n🔗 {url}"
-        pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else get_pdfs(url)
-        
+        msg = f'🎤 {title}\n\n🔗 {url}'
+        pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
+
         if pdfs:
             for p in pdfs[:3]:
                 try:
-                    r = requests.post(f"https://api.telegram.org/bot{tg_token}/sendDocument",
-                                    data={'chat_id': tg_chat, 'document': p, 'caption': msg}, timeout=30)
+                    r = await http.post(
+                        f'https://api.telegram.org/bot{tg_token}/sendDocument',
+                        data={'chat_id': tg_chat, 'document': p, 'caption': msg},
+                        timeout=30,
+                    )
                     if r.status_code == 200:
                         print('telegram: sent')
                         msg = ''
-                except:
-                    pass
+                    else:
+                        print(f'telegram document HTTP {r.status_code}: {r.text[:200]}')
+                except Exception as e:
+                    print(f'telegram document error: {e}')
         else:
-            requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                        data={'chat_id': tg_chat, 'text': msg})
+            await http.post(
+                f'https://api.telegram.org/bot{tg_token}/sendMessage',
+                data={'chat_id': tg_chat, 'text': msg},
+                timeout=10,
+            )
             print('telegram: sent')
-    except:
-        pass
+    except Exception as e:
+        print(f'telegram error: {e}')
 
-# send msg to telegram
-def tg_send(txt):
+
+async def tg_send(txt):
     try:
-        r = requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage",
-                    data={'chat_id': tg_chat, 'text': txt})
-        print(f'[BOT] << Sent reply')
+        await http.post(
+            f'https://api.telegram.org/bot{tg_token}/sendMessage',
+            data={'chat_id': tg_chat, 'text': txt},
+            timeout=10,
+        )
+        print('[BOT] << Sent reply')
     except Exception as e:
         print(f'[BOT] Send error: {e}')
 
-# send file to telegram
-def tg_file(file_url, caption=''):
-    try:
-        requests.post(f"https://api.telegram.org/bot{tg_token}/sendDocument",
-                    data={'chat_id': tg_chat, 'document': file_url, 'caption': caption}, timeout=30)
-    except:
-        pass
 
-# send photo to telegram
-def tg_photo(photo_url, caption=''):
-    try:
-        requests.post(f"https://api.telegram.org/bot{tg_token}/sendPhoto",
-                    data={'chat_id': tg_chat, 'photo': photo_url, 'caption': caption}, timeout=30)
-    except:
-        pass
-
-# handle commands
 async def handle_cmd(msg):
     global notify_on
     txt = msg.get('text', '')
-    
+
     if txt == '/start':
-        tg_send('Notices Bot\n\n/status - Check status\n/latest - Latest notices\n/stop - Stop notifications\n/post - Send custom notice')
-    
+        notify_on = True
+        await tg_send(
+            'Notifications ON\n\n'
+            '/status - Check status\n'
+            '/latest - Latest notices\n'
+            '/stop - Stop notifications\n'
+            '/post - Send custom notice'
+        )
+
     elif txt == '/status':
         status = 'ON' if notify_on else 'OFF'
         posted = get_saved()
-        tg_send(f'Status: {status}\nTotal posted: {len(posted)}')
-    
+        await tg_send(f'Status: {status}\nTotal posted: {len(posted)}')
+
     elif txt == '/latest':
-        exam = get_exam()
-        tcioe = get_tcioe()
-        msg = 'LATEST NOTICES:\n\n'
+        exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
+        out = 'LATEST NOTICES:\n\n'
         if exam:
-            msg += f"EXAM.IOE:\n{exam[0]['title']}\n{exam[0]['link']}\n\n"
+            out += f"EXAM.IOE:\n{exam[0]['title']}\n{exam[0]['link']}\n\n"
         if tcioe:
-            msg += f"TCIOE:\n{tcioe[0]['title']}\n{tcioe[0]['link']}"
-        tg_send(msg if exam or tcioe else 'No notices found')
-    
+            out += f"TCIOE:\n{tcioe[0]['title']}\n{tcioe[0]['link']}"
+        await tg_send(out if exam or tcioe else 'No notices found')
+
     elif txt == '/stop':
         notify_on = False
-        tg_send('Notifications stopped\n\nUse /start to resume')
-    
+        await tg_send('Notifications stopped\n\nUse /start to resume')
+
     elif txt.startswith('/post '):
         content = txt[6:].strip()
         if content:
-            await send_discord("info_s", content, None)
-            await send_telegram("info_s", content, None)
-            tg_send('Posted!')
-    
-    # handle files/photos with /post
-    elif 'document' in msg or 'photo' in msg:
-        if 'document' in msg:
-            file_id = msg['document']['file_id']
-            caption = msg.get('caption', 'info_s')
-            # forward to discord
-            file_info = requests.get(f"https://api.telegram.org/bot{tg_token}/getFile?file_id={file_id}").json()
-            if file_info.get('ok'):
-                file_path = file_info['result']['file_path']
-                file_url = f"https://api.telegram.org/file/bot{tg_token}/{file_path}"
-                filename = file_path.split('/')[-1]  # extract original filename
-                for w in [w1, w2]:
-                    if w:
-                        try:
-                            fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': (filename, fr.content)}, timeout=30)
-                        except:
-                            pass
-        elif 'photo' in msg:
-            photo = msg['photo'][-1]  # largest
-            file_id = photo['file_id']
-            caption = msg.get('caption', 'info_s')
-            file_info = requests.get(f"https://api.telegram.org/bot{tg_token}/getFile?file_id={file_id}").json()
-            if file_info.get('ok'):
-                file_path = file_info['result']['file_path']
-                file_url = f"https://api.telegram.org/file/bot{tg_token}/{file_path}"
-                filename = file_path.split('/')[-1]  # extract original filename
-                for w in [w1, w2]:
-                    if w:
-                        try:
-                            fr = requests.get(file_url, timeout=30)
-                            requests.post(w, data={'content': f"📄 {caption}"}, files={'file': (filename, fr.content)}, timeout=30)
-                        except:
-                            pass
-        tg_send('Posted!')
+            await send_discord('info_s', content, None)
+            await send_telegram('info_s', content, None)
+            await tg_send('Posted!')
 
-# poll telegram
+    # forward telegram docs/photos to discord webhooks
+    elif 'document' in msg or 'photo' in msg:
+        try:
+            if 'document' in msg:
+                file_id = msg['document']['file_id']
+                caption = msg.get('caption', 'info_s')
+            else:
+                file_id = msg['photo'][-1]['file_id']  # largest size
+                caption = msg.get('caption', 'info_s')
+
+            file_info = (await http.get(
+                f'https://api.telegram.org/bot{tg_token}/getFile',
+                params={'file_id': file_id},
+                timeout=10,
+            )).json()
+            if file_info.get('ok'):
+                file_path = file_info['result']['file_path']
+                file_url = f'https://api.telegram.org/file/bot{tg_token}/{file_path}'
+                filename = file_path.split('/')[-1]
+                fr = await http.get(file_url, timeout=30)
+                for w in [w1, w2]:
+                    if w:
+                        try:
+                            await http.post(
+                                w,
+                                data={'content': f'📄 {caption}'},
+                                files={'file': (filename, fr.content)},
+                                timeout=30,
+                            )
+                        except Exception as e:
+                            print(f'discord forward error: {e}')
+            await tg_send('Posted!')
+        except Exception as e:
+            print(f'forward error: {e}')
+            await tg_send('Failed to post file')
+
+
 async def poll():
     global offset
     print('[BOT] Starting Telegram bot...')
-    # skip old messages
+    # skip backlog so we don't re-handle old commands on restart
     try:
-        r = requests.get(f"https://api.telegram.org/bot{tg_token}/getUpdates", timeout=5)
+        r = await http.get(f'https://api.telegram.org/bot{tg_token}/getUpdates', timeout=5)
         data = r.json()
         if data.get('ok'):
             if data.get('result'):
@@ -313,34 +328,38 @@ async def poll():
             print(f'[BOT] API error: {data.get("description", "unknown")}')
     except Exception as e:
         print(f'[BOT] Clear error: {e}')
-    
+
     print('[BOT] Ready - listening for commands...')
     while True:
         try:
-            r = requests.get(f"https://api.telegram.org/bot{tg_token}/getUpdates?offset={offset}&timeout=5", timeout=10)
+            r = await http.get(
+                f'https://api.telegram.org/bot{tg_token}/getUpdates',
+                params={'offset': offset, 'timeout': 25},
+                timeout=35,
+            )
             data = r.json()
             if data.get('ok'):
                 for update in data.get('result', []):
                     offset = update['update_id'] + 1
                     if 'message' in update:
                         txt = update['message'].get('text', '')
-                        print(f"[BOT] >> {txt}")
+                        print(f'[BOT] >> {txt}')
                         await handle_cmd(update['message'])
         except Exception as e:
             print(f'[BOT] Poll error: {e}')
-        await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
-# main checker
+
 async def run():
-    global notify_on
     print('[MONITOR] Starting notice monitor...')
     posted = get_saved()
-    
-    # first run
+
+    # first run: mark current notices posted so we don't spam old ones
     if not posted:
         try:
             print('[MONITOR] First run, saving existing...')
-            for n in get_exam() + get_tcioe():
+            exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
+            for n in exam + tcioe:
                 save(n['link'])
             posted = get_saved()
             print(f'[MONITOR] Saved {len(posted)} - wont post old notices')
@@ -348,19 +367,20 @@ async def run():
         except Exception as e:
             print(f'[MONITOR] First run error: {e}')
             await asyncio.sleep(5)
-    
+
     print('[MONITOR] Monitoring every 5 min...')
-    # loop
     while True:
         try:
             # self-ping to keep render awake
-            try:
-                requests.get('https://notices-bot.onrender.com/', timeout=5)
-            except:
-                pass
-            
+            if health_ping_url:
+                try:
+                    await http.get(health_ping_url.rstrip('/') + '/', timeout=5)
+                except Exception as e:
+                    print(f'[HEALTH] ping failed: {e}')
+
             if notify_on:
-                for n in get_exam() + get_tcioe():
+                exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
+                for n in exam + tcioe:
                     if n['link'] not in posted:
                         print(f"[MONITOR] NEW: {n['title']}")
                         await send_discord(n['title'], n['link'], n.get('medias'))
@@ -372,14 +392,18 @@ async def run():
             print(f'[MONITOR] error: {e}')
             await asyncio.sleep(300)
 
-# run both
-async def main():
-    await asyncio.gather(run(), poll())
 
-# start health check server
+async def main():
+    global http
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        http = client
+        await asyncio.gather(run(), poll())
+
+
+# health server in a side thread; monitor + telegram poll share the event loop
 Thread(target=run_server, daemon=True).start()
 
-print('='*50)
+print('=' * 50)
 print('NOTICES BOT STARTING...')
-print('='*50)
+print('=' * 50)
 asyncio.run(main())
