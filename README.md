@@ -6,7 +6,7 @@ sends notices to discord and telegram
 
 install:
 ```
-pip install requests beautifulsoup4
+pip install -r requirements.txt
 ```
 
 make .env file:
