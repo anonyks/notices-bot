@@ -15,6 +15,7 @@ import dates_npt as dn
 from tg_bot import (
     TgMenu,
     parse_chat_ids,
+    format_from_site,
     format_reminder_bundle,
     reminder_already_sent_today,
     mark_reminder_sent_today,
@@ -183,7 +184,7 @@ async def send_discord(title, url, medias):
         if not w:
             continue
         try:
-            msg = f'{title}\n\n{url}'
+            msg = format_from_site(title, url)
             pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
 
             if pdfs:
@@ -194,13 +195,13 @@ async def send_discord(title, url, medias):
                             fn = p.split('/')[-1]  # keep original filename/extension
                             if not fn or '?' in fn:
                                 fn = 'file.pdf'
-                            await http.post(w, data={'content': msg}, files={'file': (fn, pr.content)}, timeout=30)
+                            await http.post(w, data={'content': msg[:1900]}, files={'file': (fn, pr.content)}, timeout=30)
                             print(f'discord: {fn}')
                             msg = ''
                     except Exception as e:
                         print(f'discord file error: {e}')
             else:
-                await http.post(w, json={'content': msg}, timeout=10)
+                await http.post(w, json={'content': msg[:1900]}, timeout=10)
                 print('discord: sent')
         except Exception as e:
             print(f'discord error: {e}')
@@ -269,7 +270,7 @@ async def send_telegram(title, url, medias):
     if not tg_token:
         return
     try:
-        msg = f'🌐 from_site\n🎤 {title}\n\n🔗 {url}'
+        msg = format_from_site(title, url)
         pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
 
         for chat_id in tg_chat_ids:
@@ -374,6 +375,7 @@ async def reminder_loop():
             else:
                 text = format_reminder_bundle(due)
                 await menu.send_all(text)
+                await send_discord_text_file(text)
                 print(f'[REMINDER] sent {len(due)} item(s)')
 
             await asyncio.sleep(70)

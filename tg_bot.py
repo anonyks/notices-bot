@@ -51,37 +51,55 @@ def cat_emoji(cat):
     }.get(cat, '📌')
 
 
+def format_from_site(title, url):
+    """Same text for Telegram + Discord scraped posts."""
+    title = (title or '').strip() or '(no title)'
+    url = (url or '').strip()
+    lines = [
+        '🌐 FROM SITE',
+        '━━━━━━━━━━━━━━━━',
+        title,
+    ]
+    if url:
+        lines += ['', f'🔗 {url}']
+    return '\n'.join(lines)
+
+
 def format_notice_text(n):
-    """Full notice text for preview / Discord / follow-up message."""
+    """Full notice text — same on Telegram preview/follow-up and Discord."""
     cat = n.get('category', 'general')
     title = (n.get('title') or '').strip() or '(no title)'
-    body = (n.get('body') or '').strip() or '(no body)'
+    body = (n.get('body') or '').strip()
+    link = (n.get('link') or '').strip()
+
+    if cat == 'from_site':
+        return format_from_site(title, link)
 
     if cat == 'urgent':
         lines = [
             '🚨🚨 URGENT NOTICE 🚨🚨',
             '━━━━━━━━━━━━━━━━',
             title,
-            '',
-            body,
-            '━━━━━━━━━━━━━━━━',
         ]
+        if body:
+            lines += ['', body]
+        lines.append('━━━━━━━━━━━━━━━━')
     elif cat == 'assignment':
         lines = [
             '📝 ASSIGNMENT',
             '━━━━━━━━━━━━━━━━',
             title,
-            '',
-            body,
         ]
+        if body:
+            lines += ['', body]
     else:
         lines = [
-            f'{cat_emoji(cat)} GENERAL NOTICE',
+            '📢 GENERAL NOTICE',
             '━━━━━━━━━━━━━━━━',
             title,
-            '',
-            body,
         ]
+        if body:
+            lines += ['', body]
 
     if cat == 'assignment' and n.get('deadline_ad'):
         lines += ['', f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
@@ -95,15 +113,23 @@ def format_notice_text(n):
 
 
 def format_caption(n):
-    """Short caption for photo/document (Telegram limit 1024)."""
+    """Short TG media caption; mirrors full header so Discord/TG feel the same."""
     cat = n.get('category', 'general')
     title = (n.get('title') or '').strip() or '(no title)'
-    lines = [f'{cat_emoji(cat)} {cat.upper()}', title]
+    if cat == 'urgent':
+        head = '🚨🚨 URGENT NOTICE 🚨🚨'
+    elif cat == 'assignment':
+        head = '📝 ASSIGNMENT'
+    elif cat == 'from_site':
+        head = '🌐 FROM SITE'
+    else:
+        head = '📢 GENERAL NOTICE'
+    lines = [head, '━━━━━━━━━━━━━━━━', title]
     if cat == 'assignment' and n.get('deadline_ad'):
         lines.append(f"⏰ {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
-    lines.append('(see next message for details)' if (n.get('body') or '').strip() else '')
-    text = '\n'.join([x for x in lines if x])
-    return text[:1024]
+    if (n.get('body') or '').strip():
+        lines.append('(full text in next message)')
+    return '\n'.join(lines)[:1024]
 
 
 def format_reminder_bundle(items):
