@@ -1,7 +1,7 @@
 # Telegram menu / wizard for manual notices
 import json
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import store
@@ -480,13 +480,13 @@ class TgMenu:
         for r in active:
             extra = ''
             if r.get('deadline_ad'):
-                extra = f" | ⏰ {r['deadline_ad']}"
+                extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}"
             lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
         upcoming = dn.deadlines_tomorrow(rows)
         if upcoming:
             lines += ['', '⏳ Due tomorrow:']
             for r in upcoming:
-                lines.append(f"• {r.get('title')} ({r.get('deadline_ad')})")
+                lines.append(f"• {r.get('title')} ({dn.format_deadline_short(r['deadline_ad'])})")
         if expired:
             lines += ['', f'(expired archived: {len(expired)} — tap Expired to view)']
         await self.send(
@@ -511,7 +511,7 @@ class TgMenu:
             return
         lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
         for r in expired:
-            extra = f" | ⏰ {r['deadline_ad']}" if r.get('deadline_ad') else ''
+            extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
             lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
         await self.send(chat_id, '\n'.join(lines), reply_markup=main_reply_keyboard())
 
@@ -620,14 +620,24 @@ class TgMenu:
             prefix = data.split(':')[0]
             sess['draft']['cal'] = data.split(':')[-1]
             sess['step'] = f'{prefix}_deadline_input'
+            tomorrow = dn.today_npt() + timedelta(days=1)
             await self.send(
                 chat_id,
-                f"Type deadline as YYYY-MM-DD ({sess['draft']['cal'].upper()}):\n"
-                f"Example: 2026-07-20",
+                f"Type deadline as YYYY-MM-DD ({sess['draft']['cal'].upper()}).\n"
+                f"Must be after today ({dn.today_npt().isoformat()}).\n"
+                f"Example: {tomorrow.isoformat()}",
             )
             return
 
         if data == 'create:dl:confirm':
+            ad = sess['draft'].get('deadline_ad')
+            try:
+                dn.require_future_deadline(date.fromisoformat(ad))
+            except Exception as e:
+                await self.send(chat_id, f'{e}\nPick calendar again:')
+                sess['step'] = 'create_deadline_cal'
+                await self._ask_calendar(chat_id, prefix='create')
+                return
             sess['step'] = 'create_preview'
             await self._show_preview(chat_id, sess)
             return
@@ -643,6 +653,13 @@ class TgMenu:
             if not nid or not ad:
                 await self.send(chat_id, 'Missing data. Start Edit again.')
                 self._clear(chat_id)
+                return
+            try:
+                dn.require_future_deadline(date.fromisoformat(ad))
+            except Exception as e:
+                await self.send(chat_id, f'{e}\nPick calendar again:')
+                sess['step'] = 'edit_deadline_cal'
+                await self._ask_calendar(chat_id, prefix='edit')
                 return
             store.update_manual(
                 nid,
@@ -668,6 +685,13 @@ class TgMenu:
                 await self.send(chat_id, 'Assignment needs a deadline. Start Create again.')
                 self._clear(chat_id)
                 return
+            if draft.get('category') == 'assignment':
+                try:
+                    dn.require_future_deadline(date.fromisoformat(draft['deadline_ad']))
+                except Exception as e:
+                    await self.send(chat_id, f'{e}\nStart Create again.')
+                    self._clear(chat_id)
+                    return
             notice = store.add_manual(deepcopy(draft))
             self._clear(chat_id)
             await self.publish_notice(notice)
@@ -779,14 +803,7 @@ class TgMenu:
 
     async def _show_preview(self, chat_id, sess):
         draft = sess['draft']
-        warn = ''
-        if draft.get('deadline_ad'):
-            try:
-                if date.fromisoformat(draft['deadline_ad']) < dn.today_npt():
-                    warn = '\n⚠️ Warning: deadline is already in the past.\n'
-            except Exception:
-                pass
-        text = '📣 PREVIEW — tap Publish to send' + warn + '\n\n' + format_notice_text(draft)
+        text = '📣 PREVIEW — tap Publish to send\n\n' + format_notice_text(draft)
         await self.send(
             chat_id,
             text,
@@ -939,6 +956,7 @@ class TgMenu:
                 ad = dn.bs_to_ad(txt)
             else:
                 ad = dn.ad_from_input(txt)
+            dn.require_future_deadline(ad)
             bs_str = dn.ad_to_bs_str(ad)
         except Exception as e:
             await self.send(chat_id, f'Invalid date: {e}\nTry again (YYYY-MM-DD):')
@@ -952,17 +970,12 @@ class TgMenu:
         sess['draft']['deadline_ad'] = ad.isoformat()
         sess['draft']['deadline_bs'] = bs_str
         pair = dn.format_deadline_pair(ad)
-        warn = ''
-        if ad < dn.today_npt():
-            warn = '\n⚠️ This date is already past.'
-        elif ad == dn.today_npt():
-            warn = '\nℹ️ Deadline is today (reminder already passed if after 6pm).'
 
         prefix = 'create' if mode == 'create' else 'edit'
         sess['step'] = f'{mode}_deadline_confirm'
         await self.send(
             chat_id,
-            f'Confirm deadline?{warn}\n\n{pair}',
+            f'Confirm deadline?\n\n{pair}',
             reply_markup=inline([
                 [
                     {'text': '✅ Confirm', 'callback_data': f'{prefix}:dl:confirm'},

@@ -54,7 +54,27 @@ def ad_to_bs_str(ad_date):
 
 
 def format_deadline_pair(ad_date):
-    return f'AD {ad_date.isoformat()}  |  BS {ad_to_bs_str(ad_date)}'
+    day = ad_date.strftime('%A')  # e.g. Wednesday
+    return f'AD {ad_date.isoformat()} ({day})  |  BS {ad_to_bs_str(ad_date)}'
+
+
+def format_deadline_short(ad_date_or_str):
+    """Compact for List/Status lines: 2026-07-17 (Friday)."""
+    if isinstance(ad_date_or_str, str):
+        ad_date = date.fromisoformat(ad_date_or_str)
+    else:
+        ad_date = ad_date_or_str
+    return f'{ad_date.isoformat()} ({ad_date.strftime("%A")})'
+
+
+def require_future_deadline(ad_date):
+    """Deadline must be after today (NPT). Raises ValueError if not."""
+    today = today_npt()
+    if ad_date <= today:
+        raise ValueError(
+            f'Deadline must be after today ({today.isoformat()} / {today.strftime("%A")}).'
+        )
+    return ad_date
 
 
 def is_expired(ad_deadline_str, now=None):
