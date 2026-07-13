@@ -57,6 +57,7 @@ if not w1 and not w2:
     print('WARNING: DISCORD_WEBHOOK1/2 not set — Discord posting disabled')
 
 notify_on = True
+waiting_for_post = False
 offset = 0
 http = None
 
@@ -241,10 +242,11 @@ async def tg_send(txt):
 
 
 async def handle_cmd(msg):
-    global notify_on
+    global notify_on, waiting_for_post
     txt = msg.get('text', '')
 
     if txt == '/start':
+        waiting_for_post = False
         notify_on = True
         await tg_send(
             'Notifications ON\n\n'
@@ -255,11 +257,13 @@ async def handle_cmd(msg):
         )
 
     elif txt == '/status':
+        waiting_for_post = False
         status = 'ON' if notify_on else 'OFF'
         posted = get_saved()
         await tg_send(f'Status: {status}\nTotal posted: {len(posted)}')
 
     elif txt == '/latest':
+        waiting_for_post = False
         exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
         out = 'LATEST NOTICES:\n\n'
         if exam:
@@ -269,21 +273,32 @@ async def handle_cmd(msg):
         await tg_send(out if exam or tcioe else 'No notices found')
 
     elif txt == '/stop':
+        waiting_for_post = False
         notify_on = False
         await tg_send('Notifications stopped\n\nUse /start to resume')
 
     elif txt == '/post':
+        waiting_for_post = True
         await tg_send('Send your message/file/link to post')
 
     elif txt.startswith('/post '):
+        waiting_for_post = False
         content = txt[6:].strip()
         if content:
             await send_discord('info_s', content, None)
             await send_telegram('info_s', content, None)
             await tg_send('Posted!')
 
+    # post content if waiting after /post command
+    elif waiting_for_post and txt and not txt.startswith('/'):
+        waiting_for_post = False
+        await send_discord('info_s', txt, None)
+        await send_telegram('info_s', txt, None)
+        await tg_send('Posted!')
+
     # forward telegram docs/photos to discord webhooks
     elif 'document' in msg or 'photo' in msg:
+        waiting_for_post = False
         try:
             if 'document' in msg:
                 file_id = msg['document']['file_id']
