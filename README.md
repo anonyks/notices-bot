@@ -4,55 +4,44 @@ sends notices to discord and telegram
 
 ## setup
 
-install:
 ```
 pip install -r requirements.txt
 ```
 
-make .env file:
+`.env`:
 ```
 DISCORD_WEBHOOK1=your_webhook
 DISCORD_WEBHOOK2=your_webhook
 TELEGRAM_TOKEN=your_token
-TELEGRAM_CHAT_ID=your_chat_id
+TELEGRAM_CHAT_ID=123456789
+# or several chats:
+# TELEGRAM_CHAT_ID=111,222
 ```
 
-run:
 ```
 python bot.py
 ```
 
-## get tokens
+## telegram
 
-discord webhook:
-- server settings > integrations > webhooks > new
-- copy url
+Commands only:
+- `/start` — menu (keyboard + buttons)
+- `/post` — quick dump (old style)
+- `/status` — active counts / due tomorrow
 
-telegram:
-- message @BotFather
-- /newbot
-- copy token
-- message your bot
-- go to: api.telegram.org/botTOKEN/getUpdates
-- copy chat id
+Buttons: **Create / List / Edit / Delete / Status**
 
-## commands
+Create flow: category → title → body → optional file → (assignment) AD/BS deadline → confirm → preview → Publish  
+Publish goes to Telegram + Discord.
 
-send to telegram bot:
-- /start
-- /status
-- /latest
-- /stop
-- /post your message
-- send pdf/image
+Reminders: **6:00 PM Nepal time** for assignments due **tomorrow** (combined message). Missed 6pm is not retried.
 
-## deploy free
+Storage: `manual_notices.json`, `scraped_notices.json`
+
+## scrape
+
+Still checks exam.ioe + tcioe about every 10 min, posts new notices, tags them `from_site`.
+
+## deploy
 
 see DEPLOY.md
-
-## what it does
-
-checks exam.ioe.tu.edu.np and tcioe.edu.np every 5 min
-posts new notices
-sends pdfs
-wont spam old stuff

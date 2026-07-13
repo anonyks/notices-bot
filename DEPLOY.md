@@ -1,37 +1,32 @@
-# deploy to render (free 24/7)
+# deploy to render (free)
 
 ## 1. push to github
 
 ```bash
-git remote add origin https://github.com/YOUR_USERNAME/notices-bot.git
 git push -u origin main
 ```
 
 ## 2. deploy
 
-- go to render.com
-- sign up (use github)
-- new + > blueprint
-- pick your repo
-- click apply
+- render.com → New → Blueprint (or Web Service from repo)
+- use this repo + `render.yaml` / Dockerfile
 
-## 3. add tokens
+## 3. environment
 
-in render dashboard:
-- environment tab
-- add:
-  - DISCORD_WEBHOOK1
-  - DISCORD_WEBHOOK2
-  - TELEGRAM_TOKEN
-  - TELEGRAM_CHAT_ID
-- save
+Add these in Render → Environment:
 
-done! bot runs 24/7
+- `DISCORD_WEBHOOK1`
+- `DISCORD_WEBHOOK2`
+- `TELEGRAM_TOKEN`
+- `TELEGRAM_CHAT_ID` — one id, or several: `111,222,333`
 
-## check logs
+Deps (including `nepali-datetime`) install from `requirements.txt` automatically.
 
-logs tab in render
+## 4. after deploy
 
-## restart
+Message the bot `/start` — you should get the menu keyboard.
 
-manual deploy > clear cache
+## logs / restart
+
+- Logs tab on Render
+- Manual Deploy → clear build cache & deploy if needed

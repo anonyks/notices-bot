@@ -1,6 +1,7 @@
 import os
 import asyncio
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
@@ -8,6 +9,16 @@ from threading import Thread
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+
+import store
+import dates_npt as dn
+from tg_bot import (
+    TgMenu,
+    parse_chat_ids,
+    format_reminder_bundle,
+    reminder_already_sent_today,
+    mark_reminder_sent_today,
+)
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
 # check every 10 min (was 5) so we use less Render bandwidth
@@ -39,7 +50,7 @@ load_dotenv()
 w1 = (os.getenv('DISCORD_WEBHOOK1') or '').strip()
 w2 = (os.getenv('DISCORD_WEBHOOK2') or '').strip()
 tg_token = (os.getenv('TELEGRAM_TOKEN') or '').strip()
-tg_chat = (os.getenv('TELEGRAM_CHAT_ID') or '').strip()
+tg_chat_ids = parse_chat_ids(os.getenv('TELEGRAM_CHAT_ID') or '')
 # self-ping so Render free tier doesnt sleep
 health_ping_url = (
     (os.getenv('HEALTH_PING_URL') or '').strip()
@@ -47,19 +58,18 @@ health_ping_url = (
     or 'https://notices-bot.onrender.com'
 )
 
-if not tg_token or not tg_chat:
+if not tg_token or not tg_chat_ids:
     print('ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set!')
     print(f'Token: {tg_token[:20] if tg_token else "EMPTY"}...')
-    print(f'Chat: {tg_chat or "EMPTY"}')
+    print(f'Chats: {tg_chat_ids or "EMPTY"}')
     exit(1)
 
 if not w1 and not w2:
     print('WARNING: DISCORD_WEBHOOK1/2 not set — Discord posting disabled')
 
-notify_on = True
-waiting_for_post = False
 offset = 0
 http = None
+menu = None
 
 
 def get_saved():
@@ -196,147 +206,66 @@ async def send_discord(title, url, medias):
             print(f'discord error: {e}')
 
 
+async def send_discord_text_file(caption, file_bytes=None, filename=None):
+    """Used by manual menu / quick post."""
+    for w in [w1, w2]:
+        if not w:
+            continue
+        try:
+            if file_bytes and filename:
+                await http.post(
+                    w,
+                    data={'content': caption[:1900]},
+                    files={'file': (filename, file_bytes)},
+                    timeout=30,
+                )
+            else:
+                await http.post(w, json={'content': caption[:1900]}, timeout=10)
+            print('discord: manual/quick sent')
+        except Exception as e:
+            print(f'discord manual error: {e}')
+
+
 async def send_telegram(title, url, medias):
     if not tg_token:
         return
     try:
-        msg = f'🎤 {title}\n\n🔗 {url}'
+        msg = f'🌐 from_site\n🎤 {title}\n\n🔗 {url}'
         pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
 
-        if pdfs:
-            for p in pdfs[:3]:
-                try:
-                    r = await http.post(
-                        f'https://api.telegram.org/bot{tg_token}/sendDocument',
-                        data={'chat_id': tg_chat, 'document': p, 'caption': msg},
-                        timeout=30,
-                    )
-                    if r.status_code == 200:
-                        print('telegram: sent')
-                        msg = ''
-                    else:
-                        print(f'telegram document HTTP {r.status_code}: {r.text[:200]}')
-                except Exception as e:
-                    print(f'telegram document error: {e}')
-        else:
-            await http.post(
-                f'https://api.telegram.org/bot{tg_token}/sendMessage',
-                data={'chat_id': tg_chat, 'text': msg},
-                timeout=10,
-            )
-            print('telegram: sent')
+        for chat_id in tg_chat_ids:
+            if pdfs:
+                local_msg = msg
+                for p in pdfs[:3]:
+                    try:
+                        r = await http.post(
+                            f'https://api.telegram.org/bot{tg_token}/sendDocument',
+                            data={'chat_id': chat_id, 'document': p, 'caption': local_msg},
+                            timeout=30,
+                        )
+                        if r.status_code == 200:
+                            print('telegram: sent')
+                            local_msg = ''
+                        else:
+                            print(f'telegram document HTTP {r.status_code}: {r.text[:200]}')
+                    except Exception as e:
+                        print(f'telegram document error: {e}')
+            else:
+                await http.post(
+                    f'https://api.telegram.org/bot{tg_token}/sendMessage',
+                    data={'chat_id': chat_id, 'text': msg},
+                    timeout=10,
+                )
+                print('telegram: sent')
     except Exception as e:
         print(f'telegram error: {e}')
-
-
-async def tg_send(txt):
-    try:
-        await http.post(
-            f'https://api.telegram.org/bot{tg_token}/sendMessage',
-            data={'chat_id': tg_chat, 'text': txt},
-            timeout=10,
-        )
-        print('[BOT] << Sent reply')
-    except Exception as e:
-        print(f'[BOT] Send error: {e}')
-
-
-async def handle_cmd(msg):
-    global notify_on, waiting_for_post
-    txt = msg.get('text', '')
-
-    if txt == '/start':
-        waiting_for_post = False
-        notify_on = True
-        await tg_send(
-            'Notifications ON\n\n'
-            '/status - Check status\n'
-            '/latest - Latest notices\n'
-            '/stop - Stop notifications\n'
-            '/post - Send custom notice'
-        )
-
-    elif txt == '/status':
-        waiting_for_post = False
-        status = 'ON' if notify_on else 'OFF'
-        posted = get_saved()
-        await tg_send(f'Status: {status}\nTotal posted: {len(posted)}')
-
-    elif txt == '/latest':
-        waiting_for_post = False
-        exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
-        out = 'LATEST NOTICES:\n\n'
-        if exam:
-            out += f"EXAM.IOE:\n{exam[0]['title']}\n{exam[0]['link']}\n\n"
-        if tcioe:
-            out += f"TCIOE:\n{tcioe[0]['title']}\n{tcioe[0]['link']}"
-        await tg_send(out if exam or tcioe else 'No notices found')
-
-    elif txt == '/stop':
-        waiting_for_post = False
-        notify_on = False
-        await tg_send('Notifications stopped\n\nUse /start to resume')
-
-    elif txt == '/post':
-        waiting_for_post = True
-        await tg_send('Send your message/file/link to post')
-
-    elif txt.startswith('/post '):
-        waiting_for_post = False
-        content = txt[6:].strip()
-        if content:
-            await send_discord('info_s', content, None)
-            await send_telegram('info_s', content, None)
-            await tg_send('Posted!')
-
-    # post content if waiting after /post command
-    elif waiting_for_post and txt and not txt.startswith('/'):
-        waiting_for_post = False
-        await send_discord('info_s', txt, None)
-        await send_telegram('info_s', txt, None)
-        await tg_send('Posted!')
-
-    # forward telegram docs/photos to discord webhooks
-    elif 'document' in msg or 'photo' in msg:
-        waiting_for_post = False
-        try:
-            if 'document' in msg:
-                file_id = msg['document']['file_id']
-                caption = msg.get('caption', 'info_s')
-            else:
-                file_id = msg['photo'][-1]['file_id']  # largest size
-                caption = msg.get('caption', 'info_s')
-
-            file_info = (await http.get(
-                f'https://api.telegram.org/bot{tg_token}/getFile',
-                params={'file_id': file_id},
-                timeout=10,
-            )).json()
-            if file_info.get('ok'):
-                file_path = file_info['result']['file_path']
-                file_url = f'https://api.telegram.org/file/bot{tg_token}/{file_path}'
-                filename = file_path.split('/')[-1]
-                fr = await http.get(file_url, timeout=30)
-                for w in [w1, w2]:
-                    if w:
-                        try:
-                            await http.post(
-                                w,
-                                data={'content': f'📄 {caption}'},
-                                files={'file': (filename, fr.content)},
-                                timeout=30,
-                            )
-                        except Exception as e:
-                            print(f'discord forward error: {e}')
-            await tg_send('Posted!')
-        except Exception as e:
-            print(f'forward error: {e}')
-            await tg_send('Failed to post file')
 
 
 async def poll():
     global offset
     print('[BOT] Starting Telegram bot...')
+    await menu.setup_commands()
+
     # skip backlog so we don't re-handle old commands on restart
     try:
         r = await http.get(f'https://api.telegram.org/bot{tg_token}/getUpdates', timeout=5)
@@ -367,10 +296,51 @@ async def poll():
                     if 'message' in update:
                         txt = update['message'].get('text', '')
                         print(f'[BOT] >> {txt}')
-                        await handle_cmd(update['message'])
+                    elif 'callback_query' in update:
+                        print(f"[BOT] >> cb {update['callback_query'].get('data')}")
+                    await menu.handle_update(update)
         except Exception as e:
             print(f'[BOT] Poll error: {e}')
             await asyncio.sleep(2)
+
+
+async def reminder_loop():
+    """At 6:00 PM Nepal time, remind about assignments due tomorrow. No catch-up if missed."""
+    print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
+    while True:
+        try:
+            wait_s = dn.seconds_until_next_6pm_npt()
+            print(f'[REMINDER] sleeping {wait_s}s until next 6pm NPT')
+            await asyncio.sleep(wait_s)
+
+            now = dn.now_npt()
+            # only fire near 6pm; if we missed the window, skip (no catch-up)
+            if now.hour != 18:
+                print(f'[REMINDER] skip — not 6pm window (hour={now.hour})')
+                await asyncio.sleep(30)
+                continue
+
+            if reminder_already_sent_today():
+                print('[REMINDER] already sent today — skip')
+                await asyncio.sleep(70)
+                continue
+
+            rows = store.load_manual()
+            if dn.mark_expired_rows(rows):
+                store.save_manual(rows)
+            due = dn.deadlines_tomorrow(rows, now=now)
+            mark_reminder_sent_today()  # mark even if empty, so restart won't re-spam later
+            if not due:
+                print('[REMINDER] nothing due tomorrow')
+            else:
+                text = format_reminder_bundle(due)
+                await menu.send_all(text)
+                print(f'[REMINDER] sent {len(due)} item(s)')
+
+            await asyncio.sleep(70)
+        except Exception as e:
+            print(f'[REMINDER] error: {e}')
+            await asyncio.sleep(60)
 
 
 async def run():
@@ -401,15 +371,25 @@ async def run():
                 except Exception as e:
                     print(f'[HEALTH] ping failed: {e}')
 
-            if notify_on:
-                exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
-                for n in exam + tcioe:
-                    if n['link'] not in posted:
-                        print(f"[MONITOR] NEW: {n['title']}")
-                        await send_discord(n['title'], n['link'], n.get('medias'))
-                        await send_telegram(n['title'], n['link'], n.get('medias'))
-                        save(n['link'])
-                        posted.append(n['link'])
+            # expire old assignments quietly
+            rows = store.load_manual()
+            if dn.mark_expired_rows(rows):
+                store.save_manual(rows)
+
+            exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
+            for n in exam + tcioe:
+                if n['link'] not in posted:
+                    print(f"[MONITOR] NEW: {n['title']}")
+                    await send_discord(n['title'], n['link'], n.get('medias'))
+                    await send_telegram(n['title'], n['link'], n.get('medias'))
+                    store.append_scraped({
+                        'category': 'from_site',
+                        'title': n['title'],
+                        'link': n['link'],
+                        'posted_at': datetime.now(timezone.utc).isoformat(),
+                    })
+                    save(n['link'])
+                    posted.append(n['link'])
             await asyncio.sleep(CHECK_EVERY)
         except Exception as e:
             print(f'[MONITOR] error: {e}')
@@ -417,10 +397,17 @@ async def run():
 
 
 async def main():
-    global http
+    global http, menu
     async with httpx.AsyncClient(follow_redirects=True) as client:
         http = client
-        await asyncio.gather(run(), poll())
+        menu = TgMenu(
+            http=http,
+            token=tg_token,
+            chat_ids=tg_chat_ids,
+            discord_webhooks=[w1, w2],
+            send_discord_text_file=send_discord_text_file,
+        )
+        await asyncio.gather(run(), poll(), reminder_loop())
 
 
 # health server in background, then run monitor + telegram

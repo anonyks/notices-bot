@@ -10,6 +10,9 @@ __pycache__/
 
 # Runtime
 posted.txt
+manual_notices.json
+scraped_notices.json
+reminder_sent_day.txt
 
 # IDE
 .vscode/
