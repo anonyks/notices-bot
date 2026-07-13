@@ -74,18 +74,11 @@ menu = None
 
 
 def get_saved():
-    try:
-        return Path('posted.txt').read_text().splitlines()
-    except FileNotFoundError:
-        return []
-    except Exception as e:
-        print(f'posted.txt read error: {e}')
-        return []
+    return store.load_posted()
 
 
 def save(link):
-    with open('posted.txt', 'a') as f:
-        f.write(link + '\n')
+    store.append_posted(link)
 
 
 # tcioe blocks direct requests; rotate through webshare proxies
@@ -459,4 +452,5 @@ Thread(target=run_server, daemon=True).start()
 print('=' * 50)
 print('NOTICES BOT STARTING...')
 print('=' * 50)
+store.init_storage()
 asyncio.run(main())

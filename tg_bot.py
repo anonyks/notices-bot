@@ -2,7 +2,6 @@
 import json
 from copy import deepcopy
 from datetime import date, timedelta
-from pathlib import Path
 
 import store
 import dates_npt as dn
@@ -10,7 +9,6 @@ import dates_npt as dn
 # per-chat wizard state: { chat_id: {step, draft, ...} }
 sessions = {}
 waiting_for_post = {}  # chat_id -> True after /post
-REMINDER_FLAG = Path('reminder_sent_day.txt')
 
 
 def parse_chat_ids(raw):
@@ -169,15 +167,11 @@ def format_next_reminder_line(now=None):
 
 
 def reminder_already_sent_today():
-    day = dn.today_npt().isoformat()
-    try:
-        return REMINDER_FLAG.read_text().strip() == day
-    except Exception:
-        return False
+    return store.reminder_day() == dn.today_npt().isoformat()
 
 
 def mark_reminder_sent_today():
-    REMINDER_FLAG.write_text(dn.today_npt().isoformat() + '\n', encoding='utf-8')
+    store.set_reminder_day(dn.today_npt().isoformat())
 
 
 class TgMenu:
