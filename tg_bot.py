@@ -131,6 +131,9 @@ def format_next_reminder_line(now=None):
     if now.hour < 18:
         return f'Next reminder: today 6:00 PM NPT (in {hrs}h {mins}m)'
     return f'Next reminder: tomorrow 6:00 PM NPT (in {hrs}h {mins}m)'
+
+
+def reminder_already_sent_today():
     day = dn.today_npt().isoformat()
     try:
         return REMINDER_FLAG.read_text().strip() == day
