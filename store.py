@@ -2,6 +2,8 @@
 # On Render free, local files vanish on deploy — optional GitHub Gist keeps them.
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -47,7 +49,7 @@ def _load(path):
 def _save(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
-    _push_gist()
+    schedule_gist_backup()
 
 
 def load_manual():
@@ -135,7 +137,16 @@ def append_posted(link):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a', encoding='utf-8') as f:
         f.write(link + '\n')
-    _push_gist()
+    schedule_gist_backup()
+
+
+def replace_posted(links):
+    """Write posted list once (first-run seed) — one gist backup."""
+    path = posted_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = '\n'.join(links) + ('\n' if links else '')
+    path.write_text(text, encoding='utf-8')
+    schedule_gist_backup()
 
 
 def reminder_day():
@@ -149,7 +160,7 @@ def set_reminder_day(day):
     path = reminder_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(day).strip() + '\n', encoding='utf-8')
-    _push_gist()
+    schedule_gist_backup()
 
 
 def _snapshot():
@@ -171,6 +182,8 @@ def _apply_snapshot(data):
     rem = (data.get('reminder_day') or '').strip()
     if rem:
         reminder_path().write_text(rem + '\n', encoding='utf-8')
+    elif reminder_path().exists():
+        reminder_path().write_text('', encoding='utf-8')
     return True
 
 
@@ -233,7 +246,6 @@ def _pull_gist():
                 raw = files[name]['content']
                 break
         if raw is None:
-            # first file in gist
             for meta in files.values():
                 if meta.get('content') is not None:
                     raw = meta['content']
@@ -252,14 +264,47 @@ def _pull_gist():
 
 
 _pushing = False
+_push_lock = threading.Lock()
+_push_timer = None
+_PUSH_DELAY_SEC = 3.0
 
 
-def _push_gist():
+def schedule_gist_backup():
+    """Coalesce many rapid writes into one Gist PATCH (avoids GitHub 409)."""
+    global _push_timer
+    token, gist_id = _gist_config()
+    if not token or not gist_id or httpx is None:
+        return
+    with _push_lock:
+        if _push_timer is not None:
+            _push_timer.cancel()
+        _push_timer = threading.Timer(_PUSH_DELAY_SEC, _push_gist_now)
+        _push_timer.daemon = True
+        _push_timer.start()
+
+
+def flush_gist_backup():
+    """Push immediately (e.g. end of first-run seed)."""
+    global _push_timer
+    with _push_lock:
+        if _push_timer is not None:
+            _push_timer.cancel()
+            _push_timer = None
+    _push_gist_now()
+
+
+def _push_gist_now():
     global _pushing
     token, gist_id = _gist_config()
-    if not token or not gist_id or httpx is None or _pushing:
+    if not token or not gist_id or httpx is None:
         return
-    _pushing = True
+    with _push_lock:
+        if _pushing:
+            t = threading.Timer(2.0, _push_gist_now)
+            t.daemon = True
+            t.start()
+            return
+        _pushing = True
     try:
         body = {
             'files': {
@@ -268,23 +313,29 @@ def _push_gist():
                 }
             }
         }
-        r = httpx.patch(
-            f'https://api.github.com/gists/{gist_id}',
-            headers={
-                'Authorization': f'Bearer {token}',
-                'Accept': 'application/vnd.github+json',
-            },
-            json=body,
-            timeout=20,
-        )
-        if r.status_code not in (200, 201):
+        for attempt in range(3):
+            r = httpx.patch(
+                f'https://api.github.com/gists/{gist_id}',
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'Accept': 'application/vnd.github+json',
+                },
+                json=body,
+                timeout=20,
+            )
+            if r.status_code in (200, 201):
+                print('[STORE] gist backup ok')
+                return
+            if r.status_code == 409 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
             print(f'[STORE] gist push HTTP {r.status_code}: {r.text[:200]}')
-        else:
-            print('[STORE] gist backup ok')
+            return
     except Exception as e:
         print(f'[STORE] gist push error: {e}')
     finally:
-        _pushing = False
+        with _push_lock:
+            _pushing = False
 
 
 def init_storage():
