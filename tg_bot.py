@@ -113,7 +113,7 @@ def format_notice_text(n):
 
 
 def format_caption(n):
-    """Short TG media caption; mirrors full header so Discord/TG feel the same."""
+    """Short TG media caption when full text is too long for one caption."""
     cat = n.get('category', 'general')
     title = (n.get('title') or '').strip() or '(no title)'
     if cat == 'urgent':
@@ -130,6 +130,15 @@ def format_caption(n):
     if (n.get('body') or '').strip():
         lines.append('(full text in next message)')
     return '\n'.join(lines)[:1024]
+
+
+def tg_media_parts(notice):
+    """Caption (+ optional follow-up). One TG message when full text fits in 1024."""
+    full = format_notice_text(notice)[:4096]
+    if len(full) <= 1024:
+        return full, None
+    return format_caption(notice), full
+
 
 
 def format_reminder_bundle(items):
@@ -249,7 +258,7 @@ class TgMenu:
                 ids.append(r['result']['message_id'])
             return ids
 
-        caption = format_caption(notice)
+        caption, followup = tg_media_parts(notice)
         if ft == 'photo':
             r = await self.api_post('sendPhoto', data={
                 'chat_id': chat_id, 'photo': fid, 'caption': caption
@@ -261,9 +270,8 @@ class TgMenu:
         if r.get('ok'):
             ids.append(r['result']['message_id'])
 
-        body = (notice.get('body') or '').strip()
-        if body:
-            r2 = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': full})
+        if followup:
+            r2 = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': followup})
             if r2.get('ok'):
                 ids.append(r2['result']['message_id'])
         return ids
@@ -302,7 +310,7 @@ class TgMenu:
             return await self.publish_notice(notice)
 
         full = format_notice_text(notice)[:4096]
-        caption = format_caption(notice)
+        caption, followup = tg_media_parts(notice)
         edited_any = False
 
         for ref in tg_refs:
@@ -320,11 +328,11 @@ class TgMenu:
                     edited_any = True
                 else:
                     print(f'tg edit caption fail: {r}')
-                if len(mids) >= 2:
+                if len(mids) >= 2 and followup:
                     r2 = await self.api_post('editMessageText', data={
                         'chat_id': cid,
                         'message_id': mids[1],
-                        'text': full,
+                        'text': followup,
                     })
                     if r2.get('ok'):
                         edited_any = True
