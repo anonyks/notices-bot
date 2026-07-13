@@ -143,12 +143,23 @@ def mark_reminder_sent_today():
 
 
 class TgMenu:
-    def __init__(self, http, token, chat_ids, discord_webhooks, send_discord_text_file):
+    def __init__(
+        self,
+        http,
+        token,
+        chat_ids,
+        discord_webhooks,
+        send_discord_text_file,
+        edit_discord_message=None,
+        delete_discord_message=None,
+    ):
         self.http = http
         self.token = token
         self.chat_ids = [str(c) for c in chat_ids]
         self.webhooks = [w for w in discord_webhooks if w]
         self.send_discord_text_file = send_discord_text_file
+        self.edit_discord_message = edit_discord_message
+        self.delete_discord_message = delete_discord_message
         self.api = f'https://api.telegram.org/bot{token}'
 
     async def api_post(self, method, data=None, json_body=None):
@@ -198,40 +209,141 @@ class TgMenu:
         await self.api_post('answerCallbackQuery', data=data)
 
     async def send_media(self, chat_id, notice):
-        full = format_notice_text(notice)
+        """Post notice to one chat. Returns telegram message_ids created."""
+        ids = []
+        full = format_notice_text(notice)[:4096]
         fid = notice.get('file_id')
         ft = notice.get('file_type')
         if not fid:
-            await self.send(chat_id, full)
-            return
+            r = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': full})
+            if r.get('ok'):
+                ids.append(r['result']['message_id'])
+            return ids
 
         caption = format_caption(notice)
         if ft == 'photo':
-            await self.api_post('sendPhoto', data={
+            r = await self.api_post('sendPhoto', data={
                 'chat_id': chat_id, 'photo': fid, 'caption': caption
             })
         else:
-            await self.api_post('sendDocument', data={
+            r = await self.api_post('sendDocument', data={
                 'chat_id': chat_id, 'document': fid, 'caption': caption
             })
-        # full details in follow-up (body not lost to caption limit)
+        if r.get('ok'):
+            ids.append(r['result']['message_id'])
+
         body = (notice.get('body') or '').strip()
         if body:
-            await self.send(chat_id, full)
+            r2 = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': full})
+            if r2.get('ok'):
+                ids.append(r2['result']['message_id'])
+        return ids
 
     async def publish_notice(self, notice):
+        """Post new messages to TG + Discord and save message ids on the notice."""
+        tg_refs = []
         for cid in self.chat_ids:
-            await self.send_media(cid, notice)
+            mids = await self.send_media(cid, notice)
+            if mids:
+                tg_refs.append({'chat_id': str(cid), 'message_ids': mids})
+
         file_bytes = None
         filename = notice.get('file_name')
         if notice.get('file_id'):
             file_bytes, dl_name = await self._download_tg_file(notice['file_id'])
             filename = filename or dl_name
-        await self.send_discord_text_file(
+        disc_refs = await self.send_discord_text_file(
             format_notice_text(notice),
             file_bytes=file_bytes,
             filename=filename,
-        )
+        ) or []
+
+        published = {'telegram': tg_refs, 'discord': disc_refs}
+        if notice.get('id'):
+            store.update_manual(notice['id'], published=published)
+            notice['published'] = published
+        return published
+
+    async def update_published_notice(self, notice):
+        """Edit already-posted TG + Discord messages in place."""
+        published = notice.get('published') or {}
+        tg_refs = published.get('telegram') or []
+        disc_refs = published.get('discord') or []
+        if not tg_refs and not disc_refs:
+            return await self.publish_notice(notice)
+
+        full = format_notice_text(notice)[:4096]
+        caption = format_caption(notice)
+        edited_any = False
+
+        for ref in tg_refs:
+            cid = ref.get('chat_id')
+            mids = ref.get('message_ids') or []
+            if not cid or not mids:
+                continue
+            if notice.get('file_id') and len(mids) >= 1:
+                r = await self.api_post('editMessageCaption', data={
+                    'chat_id': cid,
+                    'message_id': mids[0],
+                    'caption': caption,
+                })
+                if r.get('ok'):
+                    edited_any = True
+                else:
+                    print(f'tg edit caption fail: {r}')
+                if len(mids) >= 2:
+                    r2 = await self.api_post('editMessageText', data={
+                        'chat_id': cid,
+                        'message_id': mids[1],
+                        'text': full,
+                    })
+                    if r2.get('ok'):
+                        edited_any = True
+                    else:
+                        print(f'tg edit text fail: {r2}')
+            else:
+                r = await self.api_post('editMessageText', data={
+                    'chat_id': cid,
+                    'message_id': mids[0],
+                    'text': full,
+                })
+                if r.get('ok'):
+                    edited_any = True
+                else:
+                    print(f'tg edit text fail: {r}')
+
+        if self.edit_discord_message:
+            for ref in disc_refs:
+                ok = await self.edit_discord_message(
+                    ref.get('webhook_url'),
+                    ref.get('message_id'),
+                    format_notice_text(notice),
+                )
+                if ok:
+                    edited_any = True
+
+        if not edited_any:
+            print('[BOT] edit failed — posting as new messages')
+            return await self.publish_notice(notice)
+        return published
+
+    async def delete_published_notice(self, notice):
+        """Delete previously posted TG + Discord messages."""
+        published = notice.get('published') or {}
+        for ref in published.get('telegram') or []:
+            cid = ref.get('chat_id')
+            for mid in ref.get('message_ids') or []:
+                r = await self.api_post('deleteMessage', data={
+                    'chat_id': cid,
+                    'message_id': mid,
+                })
+                if not r.get('ok'):
+                    print(f'tg delete fail chat={cid} mid={mid}: {r}')
+        if self.delete_discord_message:
+            for ref in published.get('discord') or []:
+                ok = await self.delete_discord_message(ref.get('webhook_url'), ref.get('message_id'))
+                if not ok:
+                    print(f'discord delete fail: {ref}')
 
     async def _download_tg_file(self, file_id):
         info = await self.api_post('getFile', data={'file_id': file_id})
@@ -541,11 +653,12 @@ class TgMenu:
             if not n:
                 await self.send(chat_id, 'Not found.', reply_markup=main_reply_keyboard())
                 return
-            # mark as updated in the posted text
-            n = dict(n)
-            n['title'] = f"✏️ UPDATED — {n.get('title', '')}"
-            await self.publish_notice(n)
-            await self.send(chat_id, f'Republished {nid}', reply_markup=main_reply_keyboard())
+            await self.update_published_notice(n)
+            await self.send(
+                chat_id,
+                f'✅ Updated live messages for {nid} (Telegram + Discord)',
+                reply_markup=main_reply_keyboard(),
+            )
             return
 
         if data.startswith('edit:pick:'):
@@ -603,11 +716,14 @@ class TgMenu:
 
         if data.startswith('del:yes:'):
             nid = data.split(':')[-1]
+            n = store.get_manual(nid)
+            if n:
+                await self.delete_published_notice(n)
             ok = store.delete_manual(nid)
             self._clear(chat_id)
             await self.send(
                 chat_id,
-                f'🗑️ Deleted {nid}' if ok else 'Not found.',
+                f'🗑️ Deleted {nid} (JSON + live TG/Discord messages)' if ok else 'Not found.',
                 reply_markup=main_reply_keyboard(),
             )
 
@@ -657,10 +773,11 @@ class TgMenu:
         self._clear(chat_id)
         await self.send(
             chat_id,
-            f'✅ {what} updated for {nid}.\nRepublish to Telegram + Discord?',
+            f'✅ {what} saved for {nid}.\n'
+            'Update the already-posted Telegram + Discord messages?',
             reply_markup=inline([
                 [
-                    {'text': '📢 Republish', 'callback_data': f'edit:republish:{nid}'},
+                    {'text': '✏️ Update live posts', 'callback_data': f'edit:republish:{nid}'},
                     {'text': 'Done', 'callback_data': 'menu:cancel'},
                 ]
             ]),

@@ -207,23 +207,62 @@ async def send_discord(title, url, medias):
 
 
 async def send_discord_text_file(caption, file_bytes=None, filename=None):
-    """Used by manual menu / quick post."""
+    """Post to Discord webhooks. Returns [{webhook_url, message_id}, ...] when possible."""
+    refs = []
     for w in [w1, w2]:
         if not w:
             continue
         try:
+            # wait=true so Discord returns the message id (needed for edit/delete)
+            url = w if 'wait=' in w else (w + ('&' if '?' in w else '?') + 'wait=true')
             if file_bytes and filename:
-                await http.post(
-                    w,
+                r = await http.post(
+                    url,
                     data={'content': caption[:1900]},
                     files={'file': (filename, file_bytes)},
                     timeout=30,
                 )
             else:
-                await http.post(w, json={'content': caption[:1900]}, timeout=10)
-            print('discord: manual/quick sent')
+                r = await http.post(url, json={'content': caption[:1900]}, timeout=10)
+            if r.status_code in (200, 201):
+                try:
+                    mid = r.json().get('id')
+                    if mid:
+                        # store base webhook url without wait query
+                        base = w.split('?')[0]
+                        refs.append({'webhook_url': base, 'message_id': str(mid)})
+                except Exception:
+                    pass
+                print('discord: manual/quick sent')
+            else:
+                print(f'discord manual HTTP {r.status_code}: {r.text[:200]}')
         except Exception as e:
             print(f'discord manual error: {e}')
+    return refs
+
+
+async def edit_discord_message(webhook_url, message_id, content):
+    try:
+        base = webhook_url.split('?')[0]
+        r = await http.patch(
+            f'{base}/messages/{message_id}',
+            json={'content': content[:2000]},
+            timeout=15,
+        )
+        return r.status_code in (200, 204)
+    except Exception as e:
+        print(f'discord edit error: {e}')
+        return False
+
+
+async def delete_discord_message(webhook_url, message_id):
+    try:
+        base = webhook_url.split('?')[0]
+        r = await http.delete(f'{base}/messages/{message_id}', timeout=15)
+        return r.status_code in (200, 204)
+    except Exception as e:
+        print(f'discord delete error: {e}')
+        return False
 
 
 async def send_telegram(title, url, medias):
@@ -406,6 +445,8 @@ async def main():
             chat_ids=tg_chat_ids,
             discord_webhooks=[w1, w2],
             send_discord_text_file=send_discord_text_file,
+            edit_discord_message=edit_discord_message,
+            delete_discord_message=delete_discord_message,
         )
         await asyncio.gather(run(), poll(), reminder_loop())
 

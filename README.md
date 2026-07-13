@@ -32,8 +32,8 @@ Commands only:
 
 Buttons: **Create / List / Edit / Delete / Status**
 
-Create flow: category → title → body → optional file → (assignment) AD/BS deadline → confirm → preview → Publish  
-Publish goes to Telegram + Discord.
+Edit title/body/deadline; optional **Update live posts** edits the same TG/Discord messages (does not spam a new one).
+Delete removes JSON **and** the live TG/Discord messages when message IDs were saved at publish.
 
 Reminders: **6:00 PM Nepal time** for assignments due **tomorrow** (combined message). Missed 6pm is not retried.
 
