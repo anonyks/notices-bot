@@ -272,6 +272,9 @@ async def handle_cmd(msg):
         notify_on = False
         await tg_send('Notifications stopped\n\nUse /start to resume')
 
+    elif txt == '/post':
+        await tg_send('Send your message/file/link to post')
+
     elif txt.startswith('/post '):
         content = txt[6:].strip()
         if content:
