@@ -27,7 +27,8 @@ python bot.py
 Commands only:
 - `/start` — menu (keyboard + buttons)
 - `/post` — quick dump (old style)
-- `/status` — active counts / due tomorrow
+- `/status` — active counts / due tomorrow / next reminder
+- `/cancel` — abort current wizard or quick-post
 
 Buttons: **Create / List / Edit / Delete / Status**
 

@@ -123,7 +123,14 @@ def format_reminder_bundle(items):
     return '\n'.join(lines)
 
 
-def reminder_already_sent_today():
+def format_next_reminder_line(now=None):
+    now = now or dn.now_npt()
+    secs = dn.seconds_until_next_6pm_npt(now)
+    hrs, rem = divmod(secs, 3600)
+    mins = rem // 60
+    if now.hour < 18:
+        return f'Next reminder: today 6:00 PM NPT (in {hrs}h {mins}m)'
+    return f'Next reminder: tomorrow 6:00 PM NPT (in {hrs}h {mins}m)'
     day = dn.today_npt().isoformat()
     try:
         return REMINDER_FLAG.read_text().strip() == day
@@ -160,6 +167,7 @@ class TgMenu:
                 {'command': 'start', 'description': 'Open menu'},
                 {'command': 'post', 'description': 'Quick post (old style)'},
                 {'command': 'status', 'description': 'Bot status'},
+                {'command': 'cancel', 'description': 'Cancel current action'},
             ]
         })
 
@@ -242,13 +250,18 @@ class TgMenu:
     def _clear(self, chat_id):
         sessions[str(chat_id)] = {'step': 'idle', 'draft': {}}
 
+    async def cmd_cancel(self, chat_id):
+        waiting_for_post[str(chat_id)] = False
+        self._clear(chat_id)
+        await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard())
+
     async def cmd_start(self, chat_id):
         waiting_for_post[str(chat_id)] = False
         self._clear(chat_id)
         await self.send(
             chat_id,
             'Notices menu ready.\n\n'
-            'Commands: /start  /post  /status\n'
+            'Commands: /start  /post  /status  /cancel\n'
             'Or use the buttons below 👇',
             reply_markup=main_reply_keyboard(),
         )
@@ -264,7 +277,10 @@ class TgMenu:
                     {'text': '✏️ Edit', 'callback_data': 'menu:edit'},
                     {'text': '🗑️ Delete', 'callback_data': 'menu:delete'},
                 ],
-                [{'text': '📊 Status', 'callback_data': 'menu:status'}],
+                [
+                    {'text': '📊 Status', 'callback_data': 'menu:status'},
+                    {'text': '📦 Expired', 'callback_data': 'menu:expired'},
+                ],
             ]),
         )
 
@@ -285,7 +301,8 @@ class TgMenu:
             f'Active notices: {len(active)}\n'
             f'Active assignments: {len(assigns)}\n'
             f'Due tomorrow: {len(upcoming)}\n'
-            f'Reminder: 6:00 PM NPT (no catch-up if missed)\n'
+            f'{format_next_reminder_line(now)}\n'
+            f'(no catch-up if 6pm is missed)\n'
             f'Allowed chats: {len(self.chat_ids)}\n'
             'Scrape monitor: running',
             reply_markup=main_reply_keyboard(),
@@ -296,7 +313,7 @@ class TgMenu:
         waiting_for_post[str(chat_id)] = True
         await self.send(
             chat_id,
-            'Quick post mode.\nSend text, photo, or PDF now.\n(or /start to cancel)',
+            'Quick post mode.\nSend text, photo, or PDF now.\n(/cancel to abort)',
             reply_markup=main_reply_keyboard(),
         )
 
@@ -310,8 +327,13 @@ class TgMenu:
         expired = [r for r in rows if r.get('status') == 'expired']
         active = sorted(active, key=lambda r: r.get('created_at', ''), reverse=True)[:15]
         if not active:
-            await self.send(chat_id, f'No active notices.\n(expired on file: {len(expired)})',
-                            reply_markup=main_reply_keyboard())
+            await self.send(
+                chat_id,
+                f'No active notices.\n(expired on file: {len(expired)})',
+                reply_markup=inline([
+                    [{'text': '📦 View expired', 'callback_data': 'menu:expired'}],
+                ]) if expired else main_reply_keyboard(),
+            )
             return
         lines = ['📋 Active notices', '━━━━━━━━━━━━━━━━', '']
         for r in active:
@@ -325,7 +347,31 @@ class TgMenu:
             for r in upcoming:
                 lines.append(f"• {r.get('title')} ({r.get('deadline_ad')})")
         if expired:
-            lines += ['', f'(expired archived: {len(expired)})']
+            lines += ['', f'(expired archived: {len(expired)} — tap Expired to view)']
+        await self.send(
+            chat_id,
+            '\n'.join(lines),
+            reply_markup=inline([
+                [{'text': '📦 View expired', 'callback_data': 'menu:expired'}],
+                [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
+            ]) if expired else main_reply_keyboard(),
+        )
+
+    async def show_expired(self, chat_id):
+        waiting_for_post[str(chat_id)] = False
+        self._clear(chat_id)
+        rows = store.load_manual()
+        if dn.mark_expired_rows(rows):
+            store.save_manual(rows)
+        expired = [r for r in rows if r.get('status') == 'expired']
+        expired = sorted(expired, key=lambda r: r.get('deadline_ad') or r.get('created_at', ''), reverse=True)[:20]
+        if not expired:
+            await self.send(chat_id, 'No expired notices.', reply_markup=main_reply_keyboard())
+            return
+        lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
+        for r in expired:
+            extra = f" | ⏰ {r['deadline_ad']}" if r.get('deadline_ad') else ''
+            lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
         await self.send(chat_id, '\n'.join(lines), reply_markup=main_reply_keyboard())
 
     async def start_create(self, chat_id):
@@ -406,6 +452,9 @@ class TgMenu:
         if data == 'menu:status':
             await self.cmd_status(chat_id)
             return
+        if data == 'menu:expired':
+            await self.show_expired(chat_id)
+            return
 
         if data.startswith('create:cat:'):
             cat = data.split(':')[-1]
@@ -460,9 +509,7 @@ class TgMenu:
                 deadline_bs=sess['draft'].get('deadline_bs'),
                 status='active',
             )
-            self._clear(chat_id)
-            await self.send(chat_id, f'✅ Deadline updated for {nid}',
-                            reply_markup=main_reply_keyboard())
+            await self._after_edit(chat_id, nid, 'Deadline')
             return
 
         if data == 'edit:dl:retry':
@@ -485,6 +532,20 @@ class TgMenu:
             await self.publish_notice(notice)
             await self.send(chat_id, f"✅ Published {notice['id']}",
                             reply_markup=main_reply_keyboard())
+            return
+
+        if data.startswith('edit:republish:'):
+            nid = data.split(':')[-1]
+            n = store.get_manual(nid)
+            self._clear(chat_id)
+            if not n:
+                await self.send(chat_id, 'Not found.', reply_markup=main_reply_keyboard())
+                return
+            # mark as updated in the posted text
+            n = dict(n)
+            n['title'] = f"✏️ UPDATED — {n.get('title', '')}"
+            await self.publish_notice(n)
+            await self.send(chat_id, f'Republished {nid}', reply_markup=main_reply_keyboard())
             return
 
         if data.startswith('edit:pick:'):
@@ -592,6 +653,19 @@ class TgMenu:
             ]),
         )
 
+    async def _after_edit(self, chat_id, nid, what):
+        self._clear(chat_id)
+        await self.send(
+            chat_id,
+            f'✅ {what} updated for {nid}.\nRepublish to Telegram + Discord?',
+            reply_markup=inline([
+                [
+                    {'text': '📢 Republish', 'callback_data': f'edit:republish:{nid}'},
+                    {'text': 'Done', 'callback_data': 'menu:cancel'},
+                ]
+            ]),
+        )
+
     async def _handle_menu_label(self, chat_id, txt):
         """Reply-keyboard actions work anytime (not only idle)."""
         if txt == 'Create':
@@ -620,6 +694,9 @@ class TgMenu:
             return
         if txt.startswith('/status'):
             await self.cmd_status(chat_id)
+            return
+        if txt.startswith('/cancel'):
+            await self.cmd_cancel(chat_id)
             return
         if txt == '/post' or txt.startswith('/post'):
             if txt.startswith('/post ') and len(txt) > 6:
@@ -690,15 +767,15 @@ class TgMenu:
             return
 
         if step == 'edit_wait_title' and txt:
-            store.update_manual(sess['draft']['id'], title=txt)
-            self._clear(chat_id)
-            await self.send(chat_id, '✅ Title updated.', reply_markup=main_reply_keyboard())
+            nid = sess['draft']['id']
+            store.update_manual(nid, title=txt)
+            await self._after_edit(chat_id, nid, 'Title')
             return
 
         if step == 'edit_wait_body' and txt:
-            store.update_manual(sess['draft']['id'], body=txt)
-            self._clear(chat_id)
-            await self.send(chat_id, '✅ Body updated.', reply_markup=main_reply_keyboard())
+            nid = sess['draft']['id']
+            store.update_manual(nid, body=txt)
+            await self._after_edit(chat_id, nid, 'Body')
             return
 
         if step == 'edit_deadline_input' and txt:
