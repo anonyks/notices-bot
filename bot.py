@@ -386,8 +386,9 @@ async def run():
         try:
             print('[MONITOR] First run, saving existing...')
             exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
-            for n in exam + tcioe:
-                save(n['link'])
+            links = [n['link'] for n in exam + tcioe]
+            store.replace_posted(links)
+            store.flush_gist_backup()
             posted = get_saved()
             print(f'[MONITOR] Saved {len(posted)} - wont post old notices')
             await asyncio.sleep(5)
