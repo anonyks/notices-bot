@@ -153,23 +153,75 @@ async def get_tcioe():
         return []
 
 
-async def get_pdfs(url):
+async def get_notice_attachments(url):
+    """PDFs + images from the notice body only (not page chrome / other notices)."""
     try:
         r = await http.get(url, headers={'User-Agent': UA}, timeout=10)
         r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
-        pdfs = []
-        for a in s.find_all('a', href=lambda x: x and ('.pdf' in str(x).lower() or '/medias/' in str(x))):
-            h = a.get('href')
-            if h:
-                if not h.startswith('http'):
-                    h = 'https://portal.tu.edu.np' + h if h.startswith('/') else 'https://exam.ioe.tu.edu.np/' + h
-                if h not in pdfs:
-                    pdfs.append(h)
-        return pdfs
+        # exam.ioe detail body; never scan whole page (logos, sidebar, highlights)
+        root = (
+            s.select_one('.detail-page-inner')
+            or s.select_one('.detail-page .ck-table')
+            or s.select_one('article')
+        )
+        if not root:
+            print(f'get_notice_attachments: no detail body on {url}')
+            return []
+
+        out = []
+        seen = set()
+
+        def add(href, kind):
+            if not href or href.startswith('data:'):
+                return
+            h = href.strip()
+            if not h.startswith('http'):
+                if h.startswith('/'):
+                    h = 'https://portal.tu.edu.np' + h if '/medias/' in h else 'https://exam.ioe.tu.edu.np' + h
+                else:
+                    h = 'https://exam.ioe.tu.edu.np/' + h
+            if h in seen:
+                return
+            seen.add(h)
+            out.append({'url': h, 'kind': kind})
+
+        for a in root.find_all('a', href=True):
+            h = a['href']
+            low = h.lower()
+            if '.pdf' in low or '/medias/' in low:
+                kind = 'image' if any(low.split('?')[0].endswith(ext) for ext in (
+                    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'
+                )) else 'document'
+                add(h, kind)
+
+        for img in root.find_all('img', src=True):
+            src = img['src']
+            low = src.lower()
+            # skip obvious chrome
+            if any(x in low for x in ('logo', 'icon', 'avatar', 'sprite', 'favicon')):
+                continue
+            add(src, 'image')
+
+        return out
     except Exception as e:
-        print(f'get_pdfs error ({url}): {e}')
+        print(f'get_notice_attachments error ({url}): {e}')
         return []
+
+
+def _attachments_from_medias(medias):
+    """Normalize tcioe-style medias list."""
+    out = []
+    for m in medias or []:
+        f = m.get('file')
+        if not f:
+            continue
+        mt = (m.get('mediaType') or '').upper()
+        if mt in ('IMAGE', 'PHOTO', 'IMG'):
+            out.append({'url': f, 'kind': 'image'})
+        else:
+            out.append({'url': f, 'kind': 'document'})
+    return out
 
 
 async def send_discord(title, url, medias):
@@ -178,17 +230,22 @@ async def send_discord(title, url, medias):
             continue
         try:
             msg = format_from_site(title, url)
-            pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
+            files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
 
-            if pdfs:
-                for p in pdfs[:10]:
+            if files:
+                for item in files[:10]:
                     try:
-                        pr = await http.get(p, headers={'User-Agent': UA}, timeout=30)
+                        pr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=30)
                         if pr.status_code == 200:
-                            fn = p.split('/')[-1]  # keep original filename/extension
-                            if not fn or '?' in fn:
-                                fn = 'file.pdf'
-                            await http.post(w, data={'content': msg[:1900]}, files={'file': (fn, pr.content)}, timeout=30)
+                            fn = item['url'].split('/')[-1].split('?')[0] or (
+                                'image.png' if item['kind'] == 'image' else 'file.pdf'
+                            )
+                            await http.post(
+                                w,
+                                data={'content': msg[:1900]},
+                                files={'file': (fn, pr.content)},
+                                timeout=30,
+                            )
                             print(f'discord: {fn}')
                             msg = ''
                     except Exception as e:
@@ -264,25 +321,32 @@ async def send_telegram(title, url, medias):
         return
     try:
         msg = format_from_site(title, url)
-        pdfs = [m['file'] for m in medias if m.get('mediaType') == 'DOCUMENT'] if medias else await get_pdfs(url)
+        files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
 
         for chat_id in tg_chat_ids:
-            if pdfs:
+            if files:
                 local_msg = msg
-                for p in pdfs[:3]:
+                for item in files[:3]:
                     try:
-                        r = await http.post(
-                            f'https://api.telegram.org/bot{tg_token}/sendDocument',
-                            data={'chat_id': chat_id, 'document': p, 'caption': local_msg},
-                            timeout=30,
-                        )
+                        if item['kind'] == 'image':
+                            r = await http.post(
+                                f'https://api.telegram.org/bot{tg_token}/sendPhoto',
+                                data={'chat_id': chat_id, 'photo': item['url'], 'caption': local_msg},
+                                timeout=30,
+                            )
+                        else:
+                            r = await http.post(
+                                f'https://api.telegram.org/bot{tg_token}/sendDocument',
+                                data={'chat_id': chat_id, 'document': item['url'], 'caption': local_msg},
+                                timeout=30,
+                            )
                         if r.status_code == 200:
                             print('telegram: sent')
                             local_msg = ''
                         else:
-                            print(f'telegram document HTTP {r.status_code}: {r.text[:200]}')
+                            print(f'telegram media HTTP {r.status_code}: {r.text[:200]}')
                     except Exception as e:
-                        print(f'telegram document error: {e}')
+                        print(f'telegram media error: {e}')
             else:
                 await http.post(
                     f'https://api.telegram.org/bot{tg_token}/sendMessage',

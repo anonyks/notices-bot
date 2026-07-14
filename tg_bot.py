@@ -49,6 +49,12 @@ def cat_emoji(cat):
     }.get(cat, '📌')
 
 
+def with_top_gap(text):
+    """Leading blank line so a new post separates from the message above."""
+    t = text or ''
+    return t if t.startswith('\n') else '\n' + t
+
+
 def format_from_site(title, url):
     """Same text for Telegram + Discord scraped posts."""
     title = (title or '').strip() or '(no title)'
@@ -60,7 +66,7 @@ def format_from_site(title, url):
     ]
     if url:
         lines += ['', f'🔗 {url}']
-    return '\n'.join(lines)
+    return with_top_gap('\n'.join(lines))
 
 
 def format_notice_text(n):
@@ -107,7 +113,7 @@ def format_notice_text(n):
         lines += ['', f"📎 {n.get('file_name')}"]
     elif n.get('file_type'):
         lines += ['', f"📎 Attachment: {n.get('file_type')}"]
-    return '\n'.join(lines)
+    return with_top_gap('\n'.join(lines))
 
 
 def format_caption(n):
@@ -127,7 +133,7 @@ def format_caption(n):
         lines.append(f"⏰ {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
     if (n.get('body') or '').strip():
         lines.append('(full text in next message)')
-    return '\n'.join(lines)[:1024]
+    return with_top_gap('\n'.join(lines))[:1024]
 
 
 def tg_media_parts(notice):
@@ -136,7 +142,6 @@ def tg_media_parts(notice):
     if len(full) <= 1024:
         return full, None
     return format_caption(notice), full
-
 
 
 def format_reminder_bundle(items):
@@ -153,7 +158,7 @@ def format_reminder_bundle(items):
         lines.append('')
     lines.append('━━━━━━━━━━━━━━━━')
     lines.append('Finish it before midnight 💪')
-    return '\n'.join(lines)
+    return with_top_gap('\n'.join(lines))
 
 
 def format_next_reminder_line(now=None):
