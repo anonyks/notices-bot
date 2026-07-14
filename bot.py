@@ -203,10 +203,18 @@ async def get_notice_attachments(url):
                 continue
             add(src, 'image')
 
-        return out
+        return prefer_pdf_over_images(out)
     except Exception as e:
         print(f'get_notice_attachments error ({url}): {e}')
         return []
+
+
+def prefer_pdf_over_images(files):
+    """If any PDF/document is present, skip images (notice scan of a PDF, etc.)."""
+    docs = [f for f in files if f.get('kind') != 'image']
+    if docs:
+        return docs
+    return files
 
 
 def _attachments_from_medias(medias):
@@ -221,7 +229,7 @@ def _attachments_from_medias(medias):
             out.append({'url': f, 'kind': 'image'})
         else:
             out.append({'url': f, 'kind': 'document'})
-    return out
+    return prefer_pdf_over_images(out)
 
 
 async def send_discord(title, url, medias):
