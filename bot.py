@@ -172,6 +172,13 @@ async def get_notice_attachments(url):
         out = []
         seen = set()
 
+        def norm_key(h):
+            # treat http/https as the same file
+            low = h.lower().split('?')[0].split('#')[0]
+            if low.startswith('http://'):
+                low = 'https://' + low[len('http://'):]
+            return low
+
         def add(href, kind):
             if not href or href.startswith('data:'):
                 return
@@ -181,9 +188,13 @@ async def get_notice_attachments(url):
                     h = 'https://portal.tu.edu.np' + h if '/medias/' in h else 'https://exam.ioe.tu.edu.np' + h
                 else:
                     h = 'https://exam.ioe.tu.edu.np/' + h
-            if h in seen:
+            # prefer https when both exist
+            if h.startswith('http://'):
+                h = 'https://' + h[len('http://'):]
+            key = norm_key(h)
+            if key in seen:
                 return
-            seen.add(h)
+            seen.add(key)
             out.append({'url': h, 'kind': kind})
 
         for a in root.find_all('a', href=True):
