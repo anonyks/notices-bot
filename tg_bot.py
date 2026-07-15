@@ -278,10 +278,8 @@ class TgMenu:
             sess['wizard_msgs'] = []
 
     async def _reset_chat(self, chat_id, extra_ids=None):
-        """Delete any open wizard messages, then reset session."""
-        has_wizard = bool((sessions.get(str(chat_id)) or {}).get('wizard_msgs'))
-        if self._in_wizard(chat_id) or has_wizard:
-            await self._cleanup_wizard(chat_id, extra_ids=extra_ids)
+        """Delete any tracked wizard messages (plus extras), then reset session."""
+        await self._cleanup_wizard(chat_id, extra_ids=extra_ids)
         self._clear(chat_id)
 
     async def send_all(self, text):
@@ -448,9 +446,9 @@ class TgMenu:
     def _clear(self, chat_id):
         sessions[str(chat_id)] = {'step': 'idle', 'draft': {}}
 
-    async def cmd_cancel(self, chat_id):
+    async def cmd_cancel(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
-        await self._reset_chat(chat_id)
+        await self._reset_chat(chat_id, extra_ids=[trigger_mid] if trigger_mid is not None else None)
         await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
 
     async def cmd_start(self, chat_id):
@@ -648,9 +646,17 @@ class TgMenu:
 
         if data == 'menu:cancel':
             extra = [cq.get('message', {}).get('message_id')]
+            was_flow = (
+                self._in_wizard(chat_id)
+                or bool(sess.get('wizard_msgs'))
+                or waiting_for_post.get(chat_id)
+            )
             await self._reset_chat(chat_id, extra_ids=extra)
             waiting_for_post[chat_id] = False
-            await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
+            # Create/Edit/Delete/Post abort → remove prompts, leave a short Cancelled
+            # List/Expired Close → just delete that message (keyboard stays)
+            if was_flow:
+                await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
             return
         if data == 'menu:create':
             await self.start_create(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
@@ -988,7 +994,7 @@ class TgMenu:
             await self.cmd_status(chat_id)
             return
         if txt.startswith('/cancel'):
-            await self.cmd_cancel(chat_id)
+            await self.cmd_cancel(chat_id, trigger_mid=msg.get('message_id'))
             return
         if txt == '/post' or txt.startswith('/post'):
             if txt.startswith('/post ') and len(txt) > 6:
