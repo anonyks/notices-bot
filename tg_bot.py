@@ -286,11 +286,24 @@ class TgMenu:
         for cid in self.chat_ids:
             await self.send(cid, text)
 
-    async def answer_callback(self, callback_id, text=None):
+    async def answer_callback(self, callback_id, text=None, alert=False):
         data = {'callback_query_id': callback_id}
         if text:
             data['text'] = text[:200]
+            data['show_alert'] = bool(alert)
         await self.api_post('answerCallbackQuery', data=data)
+
+    async def _strip_markup(self, chat_id, message_id):
+        if message_id is None:
+            return
+        try:
+            await self.api_post('editMessageReplyMarkup', data={
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'reply_markup': json.dumps({'inline_keyboard': []}),
+            })
+        except Exception as e:
+            print(f'[BOT] strip markup: {e}')
 
     async def send_media(self, chat_id, notice):
         """Post notice to one chat. Returns telegram message_ids created."""
@@ -449,16 +462,16 @@ class TgMenu:
     async def cmd_cancel(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         await self._reset_chat(chat_id, extra_ids=[trigger_mid] if trigger_mid is not None else None)
-        await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
 
-    async def cmd_start(self, chat_id):
+    async def cmd_start(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         await self._reset_chat(chat_id)
+        if trigger_mid is not None:
+            await self._delete_msgs(chat_id, [trigger_mid])
         await self.send(
             chat_id,
-            'Notices menu ready.\n\n'
-            'Commands: /start  /post  /status  /cancel\n'
-            'Or use the buttons below 👇',
+            'Notices menu ready.\n'
+            '/post  /status  /cancel — or use the buttons 👇',
             reply_markup=main_reply_keyboard(),
             track=False,
         )
@@ -482,9 +495,11 @@ class TgMenu:
             track=False,
         )
 
-    async def cmd_status(self, chat_id):
+    async def cmd_status(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         await self._reset_chat(chat_id)
+        if trigger_mid is not None:
+            await self._delete_msgs(chat_id, [trigger_mid])
         rows = store.load_manual()
         if dn.mark_expired_rows(rows):
             store.save_manual(rows)
@@ -503,18 +518,26 @@ class TgMenu:
             f'(no catch-up if 6pm is missed)\n'
             f'Allowed chats: {len(self.chat_ids)}\n'
             'Scrape monitor: running',
-            reply_markup=main_reply_keyboard(),
+            reply_markup=inline([[{'text': '❌ Close', 'callback_data': 'menu:cancel'}]]),
+            track=False,
         )
 
-    async def cmd_post(self, chat_id):
+    async def cmd_post(self, chat_id, trigger_mid=None):
         await self._reset_chat(chat_id)
+        if trigger_mid is not None:
+            await self._delete_msgs(chat_id, [trigger_mid])
         waiting_for_post[str(chat_id)] = True
-        await self.send(
+        ids = await self.send(
             chat_id,
             'Quick post mode.\nSend text, photo, or PDF now.\n(/cancel to abort)',
             reply_markup=main_reply_keyboard(),
             track=False,
         )
+        sessions[str(chat_id)] = {
+            'step': 'idle',
+            'draft': {},
+            'post_prompt_mid': ids[0] if ids else None,
+        }
 
     async def show_list(self, chat_id):
         waiting_for_post[str(chat_id)] = False
@@ -530,8 +553,10 @@ class TgMenu:
                 chat_id,
                 f'No active notices.\n(expired on file: {len(expired)})',
                 reply_markup=inline([
-                    [{'text': '📦 View expired', 'callback_data': 'menu:expired'}],
-                ]) if expired else main_reply_keyboard(),
+                    *([ [{'text': '📦 View expired', 'callback_data': 'menu:expired'}] ] if expired else []),
+                    [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
+                ]),
+                track=False,
             )
             return
         lines = ['📋 Active notices', '━━━━━━━━━━━━━━━━', '']
@@ -547,13 +572,15 @@ class TgMenu:
                 lines.append(f"• {r.get('title')} ({dn.format_deadline_short(r['deadline_ad'])})")
         if expired:
             lines += ['', f'(expired archived: {len(expired)} — tap Expired to view)']
+        buttons = []
+        if expired:
+            buttons.append([{'text': '📦 View expired', 'callback_data': 'menu:expired'}])
+        buttons.append([{'text': '❌ Close', 'callback_data': 'menu:cancel'}])
         await self.send(
             chat_id,
             '\n'.join(lines),
-            reply_markup=inline([
-                [{'text': '📦 View expired', 'callback_data': 'menu:expired'}],
-                [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
-            ]) if expired else main_reply_keyboard(),
+            reply_markup=inline(buttons),
+            track=False,
         )
 
     async def show_expired(self, chat_id):
@@ -565,20 +592,27 @@ class TgMenu:
         expired = [r for r in rows if r.get('status') == 'expired']
         expired = sorted(expired, key=lambda r: r.get('deadline_ad') or r.get('created_at', ''), reverse=True)[:20]
         if not expired:
-            await self.send(chat_id, 'No expired notices.', reply_markup=main_reply_keyboard())
+            await self.send(
+                chat_id,
+                'No expired notices.',
+                reply_markup=inline([[{'text': '❌ Close', 'callback_data': 'menu:cancel'}]]),
+                track=False,
+            )
             return
         lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
         for r in expired:
             extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
             lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
-        await self.send(chat_id, '\n'.join(lines), reply_markup=main_reply_keyboard())
+        await self.send(chat_id, '\n'.join(lines), reply_markup=inline([
+            [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
+        ]), track=False)
 
     async def start_create(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         await self._cleanup_wizard(chat_id)
-        sessions[str(chat_id)] = {'step': 'create_category', 'draft': {}, 'wizard_msgs': []}
         if trigger_mid is not None:
-            self._track_wizard(chat_id, trigger_mid)
+            await self._delete_msgs(chat_id, [trigger_mid])
+        sessions[str(chat_id)] = {'step': 'create_category', 'draft': {}, 'wizard_msgs': []}
         await self.send(
             chat_id,
             'Create notice — pick category:',
@@ -597,17 +631,19 @@ class TgMenu:
         rows = [r for r in rows if r.get('status') != 'expired']
         if not rows:
             await self._reset_chat(chat_id)
+            if trigger_mid is not None:
+                await self._delete_msgs(chat_id, [trigger_mid])
             await self.send(chat_id, 'Nothing to edit.', reply_markup=main_reply_keyboard(), track=False)
             return
         await self._cleanup_wizard(chat_id)
+        if trigger_mid is not None:
+            await self._delete_msgs(chat_id, [trigger_mid])
         buttons = []
         for r in rows:
             label = f"{r['id']} {r.get('title', '')}"[:60]
             buttons.append([{'text': label, 'callback_data': f"edit:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
         sessions[str(chat_id)] = {'step': 'edit_pick', 'draft': {}, 'wizard_msgs': []}
-        if trigger_mid is not None:
-            self._track_wizard(chat_id, trigger_mid)
         await self.send(chat_id, 'Edit — pick a notice:', reply_markup=inline(buttons), track=True)
 
     async def start_delete_picker(self, chat_id, trigger_mid=None):
@@ -615,17 +651,19 @@ class TgMenu:
         rows = store.recent_manual(10)
         if not rows:
             await self._reset_chat(chat_id)
+            if trigger_mid is not None:
+                await self._delete_msgs(chat_id, [trigger_mid])
             await self.send(chat_id, 'Nothing to delete.', reply_markup=main_reply_keyboard(), track=False)
             return
         await self._cleanup_wizard(chat_id)
+        if trigger_mid is not None:
+            await self._delete_msgs(chat_id, [trigger_mid])
         buttons = []
         for r in rows:
             label = f"🗑️ {r['id']} {r.get('title', '')}"[:60]
             buttons.append([{'text': label, 'callback_data': f"del:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
         sessions[str(chat_id)] = {'step': 'del_pick', 'draft': {}, 'wizard_msgs': []}
-        if trigger_mid is not None:
-            self._track_wizard(chat_id, trigger_mid)
         await self.send(chat_id, 'Delete — pick a notice:', reply_markup=inline(buttons), track=True)
 
     async def handle_update(self, update):
@@ -641,34 +679,43 @@ class TgMenu:
             await self.answer_callback(cq['id'], 'Not allowed')
             return
         data = cq.get('data') or ''
-        await self.answer_callback(cq['id'])
         sess = self._sess(chat_id)
+        cq_mid = cq.get('message', {}).get('message_id')
+
+        # toast answers must be the (only) answerCallbackQuery — defer those
+        toast_later = (
+            data == 'menu:cancel'
+            or data == 'create:publish'
+            or data.startswith('edit:done:')
+            or data.startswith('edit:republish:')
+            or data.startswith('del:yes:')
+        )
+        if not toast_later:
+            await self.answer_callback(cq['id'])
+            if data.startswith(('create:', 'edit:', 'del:')):
+                await self._strip_markup(chat_id, cq_mid)
 
         if data == 'menu:cancel':
-            extra = [cq.get('message', {}).get('message_id')]
             was_flow = (
                 self._in_wizard(chat_id)
                 or bool(sess.get('wizard_msgs'))
                 or waiting_for_post.get(chat_id)
             )
-            await self._reset_chat(chat_id, extra_ids=extra)
+            await self._reset_chat(chat_id, extra_ids=[cq_mid])
             waiting_for_post[chat_id] = False
-            # Create/Edit/Delete/Post abort → remove prompts, leave a short Cancelled
-            # List/Expired Close → just delete that message (keyboard stays)
-            if was_flow:
-                await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
+            await self.answer_callback(cq['id'], 'Cancelled' if was_flow else 'Closed')
             return
         if data == 'menu:create':
-            await self.start_create(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
+            await self.start_create(chat_id, trigger_mid=cq_mid)
             return
         if data == 'menu:list':
             await self.show_list(chat_id)
             return
         if data == 'menu:edit':
-            await self.start_edit_picker(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
+            await self.start_edit_picker(chat_id, trigger_mid=cq_mid)
             return
         if data == 'menu:delete':
-            await self.start_delete_picker(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
+            await self.start_delete_picker(chat_id, trigger_mid=cq_mid)
             return
         if data == 'menu:status':
             await self.cmd_status(chat_id)
@@ -757,72 +804,53 @@ class TgMenu:
 
         if data == 'create:publish':
             draft = sess.get('draft') or {}
-            preview_mid = cq.get('message', {}).get('message_id')
+            preview_mid = cq_mid
             if not draft.get('title') or not draft.get('body'):
+                await self.answer_callback(cq['id'], 'Incomplete notice')
                 await self._reset_chat(chat_id, extra_ids=[preview_mid])
-                await self.send(chat_id, 'Incomplete notice. Start Create again.', track=False)
                 return
             if draft.get('category') == 'assignment' and not draft.get('deadline_ad'):
+                await self.answer_callback(cq['id'], 'Needs a deadline')
                 await self._reset_chat(chat_id, extra_ids=[preview_mid])
-                await self.send(chat_id, 'Assignment needs a deadline. Start Create again.', track=False)
                 return
             if draft.get('category') == 'assignment':
                 try:
                     dn.require_future_deadline(date.fromisoformat(draft['deadline_ad']))
                 except Exception as e:
+                    await self.answer_callback(cq['id'], str(e)[:180])
                     await self._reset_chat(chat_id, extra_ids=[preview_mid])
-                    await self.send(chat_id, f'{e}\nStart Create again.', track=False)
                     return
             wizard_ids = list(sess.get('wizard_msgs') or [])
             if preview_mid is not None and int(preview_mid) not in wizard_ids:
                 wizard_ids.append(int(preview_mid))
             notice = store.add_manual(deepcopy(draft))
-            await self.publish_notice(notice)
+            await self.answer_callback(cq['id'], f"Published {notice['id']}")
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
-            await self.send(
-                chat_id,
-                f"✅ Published {notice['id']}",
-                reply_markup=main_reply_keyboard(),
-                track=False,
-            )
+            await self.publish_notice(notice)
             return
 
         if data.startswith('edit:republish:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
-            extra = [cq.get('message', {}).get('message_id')]
             wizard_ids = list(sess.get('wizard_msgs') or [])
-            for mid in extra:
-                if mid is not None and int(mid) not in wizard_ids:
-                    wizard_ids.append(int(mid))
+            if cq_mid is not None and int(cq_mid) not in wizard_ids:
+                wizard_ids.append(int(cq_mid))
             if not n:
+                await self.answer_callback(cq['id'], 'Not found')
                 await self._delete_msgs(chat_id, wizard_ids)
                 self._clear(chat_id)
-                await self.send(chat_id, 'Not found.', reply_markup=main_reply_keyboard(), track=False)
                 return
-            await self.update_published_notice(n)
+            await self.answer_callback(cq['id'], f'Updated {nid}')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
-            await self.send(
-                chat_id,
-                f'✅ Updated live messages for {nid} (Telegram + Discord)',
-                reply_markup=main_reply_keyboard(),
-                track=False,
-            )
+            await self.update_published_notice(n)
             return
 
         if data.startswith('edit:done:'):
-            nid = data.split(':')[-1]
-            extra = [cq.get('message', {}).get('message_id')]
-            await self._cleanup_wizard(chat_id, extra_ids=extra)
+            await self.answer_callback(cq['id'], 'Done')
+            await self._cleanup_wizard(chat_id, extra_ids=[cq_mid])
             self._clear(chat_id)
-            await self.send(
-                chat_id,
-                f'✅ Saved {nid} (live posts unchanged)',
-                reply_markup=main_reply_keyboard(),
-                track=False,
-            )
             return
 
         if data.startswith('edit:pick:'):
@@ -886,22 +914,15 @@ class TgMenu:
         if data.startswith('del:yes:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
-            extra = [cq.get('message', {}).get('message_id')]
             wizard_ids = list(sess.get('wizard_msgs') or [])
-            for mid in extra:
-                if mid is not None and int(mid) not in wizard_ids:
-                    wizard_ids.append(int(mid))
+            if cq_mid is not None and int(cq_mid) not in wizard_ids:
+                wizard_ids.append(int(cq_mid))
             if n:
                 await self.delete_published_notice(n)
             ok = store.delete_manual(nid)
+            await self.answer_callback(cq['id'], f'Deleted {nid}' if ok else 'Not found')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
-            await self.send(
-                chat_id,
-                f'🗑️ Deleted {nid} (JSON + live TG/Discord messages)' if ok else 'Not found.',
-                reply_markup=main_reply_keyboard(),
-                track=False,
-            )
             return
 
     async def _ask_calendar(self, chat_id, prefix='create'):
@@ -988,10 +1009,10 @@ class TgMenu:
         step = sess.get('step', 'idle')
 
         if txt.startswith('/start'):
-            await self.cmd_start(chat_id)
+            await self.cmd_start(chat_id, trigger_mid=msg.get('message_id'))
             return
         if txt.startswith('/status'):
-            await self.cmd_status(chat_id)
+            await self.cmd_status(chat_id, trigger_mid=msg.get('message_id'))
             return
         if txt.startswith('/cancel'):
             await self.cmd_cancel(chat_id, trigger_mid=msg.get('message_id'))
@@ -1001,12 +1022,12 @@ class TgMenu:
                 waiting_for_post[chat_id] = False
                 content = txt[6:].strip()
                 if content:
+                    await self._delete_msgs(chat_id, [msg.get('message_id')])
                     await self.send_discord_text_file(f'info_s\n\n{content}')
                     for cid in self.chat_ids:
-                        await self.send(cid, f'🎤 info_s\n\n{content}')
-                    await self.send(chat_id, 'Posted!', reply_markup=main_reply_keyboard())
+                        await self.send(cid, f'🎤 info_s\n\n{content}', track=False)
                 return
-            await self.cmd_post(chat_id)
+            await self.cmd_post(chat_id, trigger_mid=msg.get('message_id'))
             return
 
         # bottom keyboard always wins (restart flow)
@@ -1126,6 +1147,9 @@ class TgMenu:
 
     async def _quick_post(self, chat_id, msg):
         waiting_for_post[chat_id] = False
+        sess = sessions.get(str(chat_id)) or {}
+        prompt_mid = sess.get('post_prompt_mid')
+        extra = [msg.get('message_id'), prompt_mid]
         try:
             if 'document' in msg or 'photo' in msg:
                 if 'document' in msg:
@@ -1153,15 +1177,19 @@ class TgMenu:
                     file_bytes=file_bytes,
                     filename=filename or dl_name,
                 )
-                await self.send(chat_id, 'Posted!', reply_markup=main_reply_keyboard())
+                await self._delete_msgs(chat_id, extra)
+                self._clear(chat_id)
                 return
 
             txt = (msg.get('text') or '').strip()
             if txt:
                 await self.send_discord_text_file(f'info_s\n\n{txt}')
                 for cid in self.chat_ids:
-                    await self.send(cid, f'🎤 info_s\n\n{txt}')
-                await self.send(chat_id, 'Posted!', reply_markup=main_reply_keyboard())
+                    await self.send(cid, f'🎤 info_s\n\n{txt}', track=False)
+                await self._delete_msgs(chat_id, extra)
+                self._clear(chat_id)
         except Exception as e:
             print(f'quick post error: {e}')
-            await self.send(chat_id, 'Failed to post', reply_markup=main_reply_keyboard())
+            await self._delete_msgs(chat_id, extra)
+            self._clear(chat_id)
+            await self.send(chat_id, 'Failed to post', reply_markup=main_reply_keyboard(), track=False)
