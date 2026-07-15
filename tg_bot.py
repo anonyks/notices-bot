@@ -49,6 +49,16 @@ def cat_emoji(cat):
     }.get(cat, '📌')
 
 
+def notice_label(n, limit=48):
+    """Human label for toasts / lists — prefer title over m1."""
+    if not n:
+        return '?'
+    title = (n.get('title') or '').strip()
+    if title:
+        return title if len(title) <= limit else title[: limit - 1] + '…'
+    return n.get('id') or '?'
+
+
 def with_top_gap(text):
     """Leading blank line so a new post separates from the message above."""
     t = text or ''
@@ -564,12 +574,12 @@ class TgMenu:
             extra = ''
             if r.get('deadline_ad'):
                 extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}"
-            lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
+            lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         upcoming = dn.deadlines_tomorrow(rows)
         if upcoming:
             lines += ['', '⏳ Due tomorrow:']
             for r in upcoming:
-                lines.append(f"• {r.get('title')} ({dn.format_deadline_short(r['deadline_ad'])})")
+                lines.append(f"• {notice_label(r, 50)}")
         if expired:
             lines += ['', f'(expired archived: {len(expired)} — tap Expired to view)']
         buttons = []
@@ -602,7 +612,7 @@ class TgMenu:
         lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
         for r in expired:
             extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
-            lines.append(f"• {r['id']} {cat_emoji(r.get('category'))} {r.get('title', '')}{extra}")
+            lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         await self.send(chat_id, '\n'.join(lines), reply_markup=inline([
             [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
         ]), track=False)
@@ -640,7 +650,7 @@ class TgMenu:
             await self._delete_msgs(chat_id, [trigger_mid])
         buttons = []
         for r in rows:
-            label = f"{r['id']} {r.get('title', '')}"[:60]
+            label = f"{notice_label(r, 50)}"[:60]
             buttons.append([{'text': label, 'callback_data': f"edit:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
         sessions[str(chat_id)] = {'step': 'edit_pick', 'draft': {}, 'wizard_msgs': []}
@@ -660,7 +670,7 @@ class TgMenu:
             await self._delete_msgs(chat_id, [trigger_mid])
         buttons = []
         for r in rows:
-            label = f"🗑️ {r['id']} {r.get('title', '')}"[:60]
+            label = f"🗑️ {notice_label(r, 48)}"[:60]
             buttons.append([{'text': label, 'callback_data': f"del:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
         sessions[str(chat_id)] = {'step': 'del_pick', 'draft': {}, 'wizard_msgs': []}
@@ -824,7 +834,7 @@ class TgMenu:
             if preview_mid is not None and int(preview_mid) not in wizard_ids:
                 wizard_ids.append(int(preview_mid))
             notice = store.add_manual(deepcopy(draft))
-            await self.answer_callback(cq['id'], f"Published {notice['id']}")
+            await self.answer_callback(cq['id'], f"Published {notice_label(notice, 40)}")
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
             await self.publish_notice(notice)
@@ -841,7 +851,7 @@ class TgMenu:
                 await self._delete_msgs(chat_id, wizard_ids)
                 self._clear(chat_id)
                 return
-            await self.answer_callback(cq['id'], f'Updated {nid}')
+            await self.answer_callback(cq['id'], f'Updated {notice_label(n, 40)}')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
             await self.update_published_notice(n)
@@ -869,7 +879,12 @@ class TgMenu:
             if n.get('category') == 'assignment':
                 buttons.append([{'text': 'Deadline', 'callback_data': 'edit:field:deadline'}])
             buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
-            await self.send(chat_id, f'Editing {nid} — what to change?', reply_markup=inline(buttons), track=True)
+            await self.send(
+                chat_id,
+                f'Editing — {notice_label(n)}\nWhat to change?',
+                reply_markup=inline(buttons),
+                track=True,
+            )
             return
 
         if data.startswith('edit:field:'):
@@ -900,7 +915,7 @@ class TgMenu:
             self._track_wizard(chat_id, cq.get('message', {}).get('message_id'))
             await self.send(
                 chat_id,
-                f'Delete {nid}?\n{preview}',
+                f'Delete this notice?\n{notice_label(n) if n else nid}',
                 reply_markup=inline([
                     [
                         {'text': 'Yes, delete', 'callback_data': f'del:yes:{nid}'},
@@ -914,13 +929,14 @@ class TgMenu:
         if data.startswith('del:yes:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
+            label = notice_label(n) if n else nid
             wizard_ids = list(sess.get('wizard_msgs') or [])
             if cq_mid is not None and int(cq_mid) not in wizard_ids:
                 wizard_ids.append(int(cq_mid))
             if n:
                 await self.delete_published_notice(n)
             ok = store.delete_manual(nid)
-            await self.answer_callback(cq['id'], f'Deleted {nid}' if ok else 'Not found')
+            await self.answer_callback(cq['id'], f'Deleted {label}'[:200] if ok else 'Not found')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
             return
@@ -963,6 +979,7 @@ class TgMenu:
     async def _after_edit(self, chat_id, nid, what):
         sess = sessions.get(str(chat_id)) or {}
         wizard = list(sess.get('wizard_msgs') or [])
+        n = store.get_manual(nid)
         sessions[str(chat_id)] = {
             'step': 'edit_after_save',
             'draft': {'id': nid},
@@ -970,7 +987,7 @@ class TgMenu:
         }
         await self.send(
             chat_id,
-            f'✅ {what} saved for {nid}.\n'
+            f'✅ {what} saved for {notice_label(n)}.\n'
             'Update the already-posted Telegram + Discord messages?',
             reply_markup=inline([
                 [
