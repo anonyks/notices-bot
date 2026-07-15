@@ -237,16 +237,16 @@ class TgMenu:
             if r.get('ok'):
                 ids.append(r['result']['message_id'])
         if track is None:
-            track = self._creating(chat_id)
+            track = self._in_wizard(chat_id)
         if track:
             for mid in ids:
                 self._track_wizard(chat_id, mid)
         print('[BOT] << Sent reply')
         return ids
 
-    def _creating(self, chat_id):
+    def _in_wizard(self, chat_id):
         step = str((sessions.get(str(chat_id)) or {}).get('step') or '')
-        return step.startswith('create')
+        return step.startswith(('create', 'edit', 'del'))
 
     def _track_wizard(self, chat_id, message_id):
         if message_id is None:
@@ -267,13 +267,15 @@ class TgMenu:
             except Exception as e:
                 print(f'[BOT] deleteMessage {mid}: {e}')
 
-    async def _cleanup_create_wizard(self, chat_id, extra_ids=None):
+    async def _cleanup_wizard(self, chat_id, extra_ids=None):
         sess = sessions.get(str(chat_id)) or {}
         ids = list(sess.get('wizard_msgs') or [])
         for mid in extra_ids or []:
             if mid is not None and int(mid) not in ids:
                 ids.append(int(mid))
         await self._delete_msgs(chat_id, ids)
+        if sess is not None:
+            sess['wizard_msgs'] = []
 
     async def send_all(self, text):
         for cid in self.chat_ids:
@@ -440,8 +442,8 @@ class TgMenu:
 
     async def cmd_cancel(self, chat_id):
         waiting_for_post[str(chat_id)] = False
-        if self._creating(chat_id):
-            await self._cleanup_create_wizard(chat_id)
+        if self._in_wizard(chat_id):
+            await self._cleanup_wizard(chat_id)
         self._clear(chat_id)
         await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
 
@@ -581,33 +583,38 @@ class TgMenu:
             track=True,
         )
 
-    async def start_edit_picker(self, chat_id):
+    async def start_edit_picker(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         rows = store.recent_manual(10)
         rows = [r for r in rows if r.get('status') != 'expired']
         if not rows:
-            await self.send(chat_id, 'Nothing to edit.', reply_markup=main_reply_keyboard())
+            await self.send(chat_id, 'Nothing to edit.', reply_markup=main_reply_keyboard(), track=False)
             return
         buttons = []
         for r in rows:
             label = f"{r['id']} {r.get('title', '')}"[:60]
             buttons.append([{'text': label, 'callback_data': f"edit:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
-        sessions[str(chat_id)] = {'step': 'edit_pick', 'draft': {}}
-        await self.send(chat_id, 'Edit — pick a notice:', reply_markup=inline(buttons))
+        sessions[str(chat_id)] = {'step': 'edit_pick', 'draft': {}, 'wizard_msgs': []}
+        if trigger_mid is not None:
+            self._track_wizard(chat_id, trigger_mid)
+        await self.send(chat_id, 'Edit — pick a notice:', reply_markup=inline(buttons), track=True)
 
-    async def start_delete_picker(self, chat_id):
+    async def start_delete_picker(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         rows = store.recent_manual(10)
         if not rows:
-            await self.send(chat_id, 'Nothing to delete.', reply_markup=main_reply_keyboard())
+            await self.send(chat_id, 'Nothing to delete.', reply_markup=main_reply_keyboard(), track=False)
             return
         buttons = []
         for r in rows:
             label = f"🗑️ {r['id']} {r.get('title', '')}"[:60]
             buttons.append([{'text': label, 'callback_data': f"del:pick:{r['id']}"}])
         buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
-        await self.send(chat_id, 'Delete — pick a notice:', reply_markup=inline(buttons))
+        sessions[str(chat_id)] = {'step': 'del_pick', 'draft': {}, 'wizard_msgs': []}
+        if trigger_mid is not None:
+            self._track_wizard(chat_id, trigger_mid)
+        await self.send(chat_id, 'Delete — pick a notice:', reply_markup=inline(buttons), track=True)
 
     async def handle_update(self, update):
         if 'callback_query' in update:
@@ -627,8 +634,8 @@ class TgMenu:
 
         if data == 'menu:cancel':
             extra = [cq.get('message', {}).get('message_id')]
-            if self._creating(chat_id):
-                await self._cleanup_create_wizard(chat_id, extra_ids=extra)
+            if self._in_wizard(chat_id):
+                await self._cleanup_wizard(chat_id, extra_ids=extra)
             self._clear(chat_id)
             waiting_for_post[chat_id] = False
             await self.send(chat_id, 'Cancelled.', reply_markup=main_reply_keyboard(), track=False)
@@ -640,10 +647,10 @@ class TgMenu:
             await self.show_list(chat_id)
             return
         if data == 'menu:edit':
-            await self.start_edit_picker(chat_id)
+            await self.start_edit_picker(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
             return
         if data == 'menu:delete':
-            await self.start_delete_picker(chat_id)
+            await self.start_delete_picker(chat_id, trigger_mid=cq.get('message', {}).get('message_id'))
             return
         if data == 'menu:status':
             await self.cmd_status(chat_id)
@@ -766,15 +773,37 @@ class TgMenu:
         if data.startswith('edit:republish:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
-            self._clear(chat_id)
+            extra = [cq.get('message', {}).get('message_id')]
+            wizard_ids = list(sess.get('wizard_msgs') or [])
+            for mid in extra:
+                if mid is not None and int(mid) not in wizard_ids:
+                    wizard_ids.append(int(mid))
             if not n:
-                await self.send(chat_id, 'Not found.', reply_markup=main_reply_keyboard())
+                await self._delete_msgs(chat_id, wizard_ids)
+                self._clear(chat_id)
+                await self.send(chat_id, 'Not found.', reply_markup=main_reply_keyboard(), track=False)
                 return
             await self.update_published_notice(n)
+            await self._delete_msgs(chat_id, wizard_ids)
+            self._clear(chat_id)
             await self.send(
                 chat_id,
                 f'✅ Updated live messages for {nid} (Telegram + Discord)',
                 reply_markup=main_reply_keyboard(),
+                track=False,
+            )
+            return
+
+        if data.startswith('edit:done:'):
+            nid = data.split(':')[-1]
+            extra = [cq.get('message', {}).get('message_id')]
+            await self._cleanup_wizard(chat_id, extra_ids=extra)
+            self._clear(chat_id)
+            await self.send(
+                chat_id,
+                f'✅ Saved {nid} (live posts unchanged)',
+                reply_markup=main_reply_keyboard(),
+                track=False,
             )
             return
 
@@ -782,8 +811,9 @@ class TgMenu:
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
             if not n:
-                await self.send(chat_id, 'Not found.')
+                await self.send(chat_id, 'Not found.', track=True)
                 return
+            self._track_wizard(chat_id, cq.get('message', {}).get('message_id'))
             sess['step'] = 'edit_field'
             sess['draft'] = {'id': nid}
             buttons = [
@@ -793,7 +823,7 @@ class TgMenu:
             if n.get('category') == 'assignment':
                 buttons.append([{'text': 'Deadline', 'callback_data': 'edit:field:deadline'}])
             buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
-            await self.send(chat_id, f'Editing {nid} — what to change?', reply_markup=inline(buttons))
+            await self.send(chat_id, f'Editing {nid} — what to change?', reply_markup=inline(buttons), track=True)
             return
 
         if data.startswith('edit:field:'):
@@ -819,6 +849,9 @@ class TgMenu:
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
             preview = n.get('title', '') if n else ''
+            sess['step'] = 'del_confirm'
+            sess['draft'] = {'id': nid}
+            self._track_wizard(chat_id, cq.get('message', {}).get('message_id'))
             await self.send(
                 chat_id,
                 f'Delete {nid}?\n{preview}',
@@ -828,21 +861,30 @@ class TgMenu:
                         {'text': 'No', 'callback_data': 'menu:cancel'},
                     ]
                 ]),
+                track=True,
             )
             return
 
         if data.startswith('del:yes:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
+            extra = [cq.get('message', {}).get('message_id')]
+            wizard_ids = list(sess.get('wizard_msgs') or [])
+            for mid in extra:
+                if mid is not None and int(mid) not in wizard_ids:
+                    wizard_ids.append(int(mid))
             if n:
                 await self.delete_published_notice(n)
             ok = store.delete_manual(nid)
+            await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
             await self.send(
                 chat_id,
                 f'🗑️ Deleted {nid} (JSON + live TG/Discord messages)' if ok else 'Not found.',
                 reply_markup=main_reply_keyboard(),
+                track=False,
             )
+            return
 
     async def _ask_calendar(self, chat_id, prefix='create'):
         await self.send(
@@ -880,7 +922,13 @@ class TgMenu:
         )
 
     async def _after_edit(self, chat_id, nid, what):
-        self._clear(chat_id)
+        sess = sessions.get(str(chat_id)) or {}
+        wizard = list(sess.get('wizard_msgs') or [])
+        sessions[str(chat_id)] = {
+            'step': 'edit_after_save',
+            'draft': {'id': nid},
+            'wizard_msgs': wizard,
+        }
         await self.send(
             chat_id,
             f'✅ {what} saved for {nid}.\n'
@@ -888,9 +936,10 @@ class TgMenu:
             reply_markup=inline([
                 [
                     {'text': '✏️ Update live posts', 'callback_data': f'edit:republish:{nid}'},
-                    {'text': 'Done', 'callback_data': 'menu:cancel'},
+                    {'text': 'Done', 'callback_data': f'edit:done:{nid}'},
                 ]
             ]),
+            track=True,
         )
 
     async def _handle_menu_label(self, chat_id, txt, trigger_mid=None):
@@ -899,12 +948,16 @@ class TgMenu:
             await self.start_create(chat_id, trigger_mid=trigger_mid)
         elif txt == 'List':
             await self.show_list(chat_id)
+            if trigger_mid is not None:
+                await self._delete_msgs(chat_id, [trigger_mid])
         elif txt == 'Edit':
-            await self.start_edit_picker(chat_id)
+            await self.start_edit_picker(chat_id, trigger_mid=trigger_mid)
         elif txt == 'Delete':
-            await self.start_delete_picker(chat_id)
+            await self.start_delete_picker(chat_id, trigger_mid=trigger_mid)
         else:
             await self.cmd_status(chat_id)
+            if trigger_mid is not None:
+                await self._delete_msgs(chat_id, [trigger_mid])
 
     async def _on_message(self, msg):
         chat_id = str(msg['chat']['id'])
@@ -947,8 +1000,8 @@ class TgMenu:
             await self._quick_post(chat_id, msg)
             return
 
-        # during Create wizard, track user replies so we can delete them on Publish
-        if self._creating(chat_id) and msg.get('message_id') is not None:
+        # during Create/Edit/Delete wizard, track user replies so we can delete them at the end
+        if self._in_wizard(chat_id) and msg.get('message_id') is not None:
             self._track_wizard(chat_id, msg['message_id'])
 
         if step == 'create_title' and txt:
