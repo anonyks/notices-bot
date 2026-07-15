@@ -445,13 +445,14 @@ async def reminder_loop():
             if dn.mark_expired_rows(rows):
                 store.save_manual(rows)
             due = dn.deadlines_tomorrow(rows, now=now)
-            mark_reminder_sent_today()  # mark even if empty, so restart won't re-spam later
             if not due:
+                mark_reminder_sent_today()  # empty day — don't re-check all night
                 print('[REMINDER] nothing due tomorrow')
             else:
                 text = format_reminder_bundle(due)
                 await menu.send_all(text)
                 await send_discord_text_file(text)
+                mark_reminder_sent_today()  # only after a successful send attempt
                 print(f'[REMINDER] sent {len(due)} item(s)')
 
             await asyncio.sleep(70)
