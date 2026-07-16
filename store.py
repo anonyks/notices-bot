@@ -35,34 +35,62 @@ def reminder_path():
     return data_dir() / 'reminder_sent_day.txt'
 
 
-def reminder_posts_path():
-    return data_dir() / 'reminder_posts.json'
-
-
-def load_reminder_posts():
-    path = reminder_posts_path()
+def _load_reminder_state():
+    """One gist-backed file: day + optional telegram/discord reminder message refs."""
+    path = reminder_path()
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        return data if isinstance(data, dict) else {}
+        raw = path.read_text(encoding='utf-8').strip()
+        if not raw:
+            return {}
+        if raw.startswith('{'):
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        # legacy plain day string
+        return {'day': raw}
     except Exception as e:
-        print(f'[STORE] reminder_posts read error: {e}')
+        print(f'[STORE] reminder state read error: {e}')
         return {}
 
 
-def save_reminder_posts(data):
-    path = reminder_posts_path()
+def _save_reminder_state(data):
+    path = reminder_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data or {}, ensure_ascii=False, indent=2), encoding='utf-8')
     schedule_gist_backup()
 
 
+def reminder_day():
+    return str((_load_reminder_state() or {}).get('day') or '').strip()
+
+
+def set_reminder_day(day):
+    st = _load_reminder_state()
+    st['day'] = str(day).strip()
+    _save_reminder_state(st)
+
+
+def load_reminder_posts():
+    st = _load_reminder_state()
+    if st.get('telegram') or st.get('discord') or st.get('notice_ids'):
+        return st
+    return {}
+
+
+def save_reminder_posts(data):
+    st = dict(data or {})
+    if not st.get('day'):
+        st['day'] = reminder_day() or ''
+    _save_reminder_state(st)
+
+
 def clear_reminder_posts():
-    path = reminder_posts_path()
-    if path.exists():
-        path.write_text('{}\n', encoding='utf-8')
-        schedule_gist_backup()
+    st = _load_reminder_state()
+    st.pop('telegram', None)
+    st.pop('discord', None)
+    st.pop('notice_ids', None)
+    _save_reminder_state(st)
 
 
 def _load(path):
@@ -179,27 +207,19 @@ def replace_posted(links):
     schedule_gist_backup()
 
 
-def reminder_day():
-    try:
-        return reminder_path().read_text(encoding='utf-8').strip()
-    except Exception:
-        return ''
-
-
-def set_reminder_day(day):
-    path = reminder_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(day).strip() + '\n', encoding='utf-8')
-    schedule_gist_backup()
-
-
 def _snapshot():
+    st = _load_reminder_state()
     return {
         'manual': load_manual(),
         'scraped': _load(scraped_path()),
         'posted': load_posted(),
-        'reminder_day': reminder_day(),
-        'reminder_posts': load_reminder_posts(),
+        # single reminder blob (day + message refs) — kept in gist
+        'reminder': st,
+        # legacy keys for older gist restores
+        'reminder_day': st.get('day') or '',
+        'reminder_posts': {
+            k: st[k] for k in ('notice_ids', 'telegram', 'discord') if k in st
+        } if (st.get('telegram') or st.get('discord') or st.get('notice_ids')) else {},
     }
 
 
@@ -210,17 +230,21 @@ def _apply_snapshot(data):
     _save_local_only(scraped_path(), data.get('scraped') or [])
     posted = data.get('posted') or []
     posted_path().write_text('\n'.join(posted) + ('\n' if posted else ''), encoding='utf-8')
-    rem = (data.get('reminder_day') or '').strip()
-    if rem:
-        reminder_path().write_text(rem + '\n', encoding='utf-8')
-    elif reminder_path().exists():
-        reminder_path().write_text('', encoding='utf-8')
-    rem_posts = data.get('reminder_posts')
-    if isinstance(rem_posts, dict):
-        reminder_posts_path().write_text(
-            json.dumps(rem_posts, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
+
+    rem = data.get('reminder')
+    if isinstance(rem, dict) and rem:
+        _save_reminder_state(rem)
+    else:
+        st = {}
+        day = (data.get('reminder_day') or '').strip()
+        if day:
+            st['day'] = day
+        posts = data.get('reminder_posts')
+        if isinstance(posts, dict):
+            for k in ('notice_ids', 'telegram', 'discord', 'day'):
+                if posts.get(k) is not None:
+                    st[k] = posts[k]
+        _save_reminder_state(st)
     return True
 
 
@@ -246,7 +270,6 @@ def _migrate_cwd_files():
         'scraped_notices.json',
         'posted.txt',
         'reminder_sent_day.txt',
-        'reminder_posts.json',
     ):
         src = cwd / name
         dst = d / name

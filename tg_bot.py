@@ -333,14 +333,23 @@ class TgMenu:
         if not newly:
             return []
         store.save_manual(rows)
+        titles = []
         for n in newly:
             label = notice_label(n)
+            titles.append(label)
             print(f'[EXPIRE] {label}')
             try:
-                await self.update_published_notice(n)
+                await self.update_published_notice(n, allow_republish=False)
             except Exception as e:
                 print(f'[EXPIRE] update live fail {label}: {e}')
         await self._cleanup_reminder_if_needed(newly)
+        try:
+            names = ', '.join(titles[:5])
+            if len(titles) > 5:
+                names += f' (+{len(titles) - 5} more)'
+            await self.send_all(f'⏰ expired_ tagged ({len(newly)}):\n{names}')
+        except Exception as e:
+            print(f'[EXPIRE] notify fail: {e}')
         return newly
 
     async def _cleanup_reminder_if_needed(self, newly_expired):
@@ -441,13 +450,16 @@ class TgMenu:
             notice['published'] = published
         return published
 
-    async def update_published_notice(self, notice):
+    async def update_published_notice(self, notice, *, allow_republish=True):
         """Edit already-posted TG + Discord messages in place."""
         published = notice.get('published') or {}
         tg_refs = published.get('telegram') or []
         disc_refs = published.get('discord') or []
         if not tg_refs and not disc_refs:
-            return await self.publish_notice(notice)
+            if allow_republish:
+                return await self.publish_notice(notice)
+            print('[BOT] no published refs — skip (no republish)')
+            return published
 
         full = format_notice_text(notice)[:4096]
         caption, followup = tg_media_parts(notice)
@@ -500,9 +512,11 @@ class TgMenu:
                     edited_any = True
 
         if not edited_any:
-            print('[BOT] edit failed — deleting old posts, then posting new')
-            await self.delete_published_notice(notice)
-            return await self.publish_notice(notice)
+            if allow_republish:
+                print('[BOT] edit failed — deleting old posts, then posting new')
+                await self.delete_published_notice(notice)
+                return await self.publish_notice(notice)
+            print('[BOT] edit failed — not republishing')
         return published
 
     async def delete_published_notice(self, notice):
