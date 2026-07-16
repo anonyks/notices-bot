@@ -75,6 +75,7 @@ http = None
 menu = None
 discord_lock = asyncio.Lock()
 discord_cooldown_until = 0.0
+discord_direct_blocked_until = 0.0
 
 
 PROXY_HOSTS = [
@@ -279,7 +280,7 @@ def _attachments_from_medias(medias):
 
 async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tries=3):
     """Retry webhook posts with one-at-a-time queue, cooldown, and proxy fallback."""
-    global discord_cooldown_until
+    global discord_cooldown_until, discord_direct_blocked_until
 
     def retry_after_seconds(resp):
         retry_after = 2.0
@@ -318,6 +319,16 @@ async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tr
                 print(f'discord: cooldown {wait:.1f}s')
                 await asyncio.sleep(wait)
 
+            now = loop.time()
+            if discord_direct_blocked_until > now:
+                if proxy_count == 0:
+                    routes = _proxy_urls()[:4]
+                    proxy_count = len(routes)
+                print(f'discord: direct blocked, using {proxy_count} proxies')
+            else:
+                routes = [None] + _proxy_urls()[:4]
+                proxy_count = len(routes) - 1
+
             hit_backoff = False
             for proxy in routes:
                 last = await post_once(proxy=proxy)
@@ -329,9 +340,14 @@ async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tr
 
                 if is_global_block(last):
                     discord_cooldown_until = max(discord_cooldown_until, loop.time() + retry_after)
-                    if proxy is None and proxy_count == 0:
-                        routes = [None] + _proxy_urls()[:4]
-                        proxy_count = len(routes) - 1
+                    if proxy is None:
+                        # direct route is bad for a while; skip it on later attempts/sends
+                        discord_direct_blocked_until = max(
+                            discord_direct_blocked_until,
+                            loop.time() + max(retry_after * 6, 180.0),
+                        )
+                        routes = _proxy_urls()[:4]
+                        proxy_count = len(routes)
                         print(f'discord: direct route blocked, trying {proxy_count} proxies')
                         continue
                     print(f'discord: global 429 on {route_name}, trying next route')
