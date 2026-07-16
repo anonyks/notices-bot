@@ -159,16 +159,17 @@ def tg_media_parts(notice):
 
 
 def format_reminder_bundle(items):
+    # Avoid "1." markdown lists — Discord glues the next line onto the title.
     lines = [
-        'DEADLINE REMINDER',
+        '⏰ REMINDER',
         '━━━━━━━━━━━━━━━━',
         'Due TOMORROW',
         '',
     ]
     for i, n in enumerate(items, 1):
         title = n.get('title', 'Untitled')
-        lines.append(f'{i}. {title}')
-        lines.append(f"   {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+        lines.append(f'{i}) {title}')
+        lines.append(dn.format_deadline_pair(date.fromisoformat(n['deadline_ad'])))
         lines.append('')
     lines.append('━━━━━━━━━━━━━━━━')
     lines.append('Finish it before midnight.')
