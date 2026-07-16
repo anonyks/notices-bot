@@ -162,7 +162,7 @@ def format_reminder_bundle(items):
     lines = [
         'DEADLINE REMINDER',
         '━━━━━━━━━━━━━━━━',
-        'Due TOMORROW (Nepal time)',
+        'Due TOMORROW',
         '',
     ]
     for i, n in enumerate(items, 1):
@@ -181,8 +181,8 @@ def format_next_reminder_line(now=None):
     hrs, rem = divmod(secs, 3600)
     mins = rem // 60
     if now.hour < 18:
-        return f'Next reminder: today 6:00 PM NPT (in {hrs}h {mins}m)'
-    return f'Next reminder: tomorrow 6:00 PM NPT (in {hrs}h {mins}m)'
+        return f'Next reminder: today 6:00 PM (in {hrs}h {mins}m)'
+    return f'Next reminder: tomorrow 6:00 PM (in {hrs}h {mins}m)'
 
 
 def reminder_already_sent_today():
@@ -608,7 +608,7 @@ class TgMenu:
         await self.send(
             chat_id,
             '📊 Status\n'
-            f'Nepal time now: {now.strftime("%Y-%m-%d %H:%M")}\n'
+            f'Time now: {now.strftime("%Y-%m-%d %H:%M")}\n'
             f'Active notices: {len(active)}\n'
             f'Active assignments: {len(assigns)}\n'
             f'Due tomorrow: {len(upcoming)}\n'
