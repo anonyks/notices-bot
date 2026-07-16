@@ -85,8 +85,9 @@ def is_expired(ad_deadline_str, now=None):
     return now > end
 
 
-def mark_expired_rows(rows):
-    changed = False
+def newly_expired_rows(rows):
+    """Mark newly past-deadline assignments expired. Returns those notices."""
+    newly = []
     for r in rows:
         if r.get('category') != 'assignment':
             continue
@@ -95,8 +96,12 @@ def mark_expired_rows(rows):
         dl = r.get('deadline_ad')
         if dl and is_expired(dl):
             r['status'] = 'expired'
-            changed = True
-    return changed
+            newly.append(r)
+    return newly
+
+
+def mark_expired_rows(rows):
+    return bool(newly_expired_rows(rows))
 
 
 def deadlines_tomorrow(rows, now=None):

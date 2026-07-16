@@ -99,8 +99,9 @@ def format_notice_text(n):
             lines += ['', body]
         lines.append('━━━━━━━━━━━━━━━━')
     elif cat == 'assignment':
+        expired = n.get('status') == 'expired'
         lines = [
-            '📝 ASSIGNMENT',
+            '📝 ASSIGNMENT ⚠️ expired_' if expired else '📝 ASSIGNMENT',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
@@ -118,7 +119,7 @@ def format_notice_text(n):
     if cat == 'assignment' and n.get('deadline_ad'):
         lines += ['', f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
         if n.get('status') == 'expired':
-            lines.append('⚠️ Status: EXPIRED')
+            lines.append('⚠️ Status: expired_')
     if n.get('file_name'):
         lines += ['', f"📎 {n.get('file_name')}"]
     elif n.get('file_type'):
@@ -130,10 +131,11 @@ def format_caption(n):
     """Short TG media caption when full text is too long for one caption."""
     cat = n.get('category', 'general')
     title = (n.get('title') or '').strip() or '(no title)'
+    expired = n.get('status') == 'expired'
     if cat == 'urgent':
         head = '🚨🚨 URGENT NOTICE 🚨🚨'
     elif cat == 'assignment':
-        head = '📝 ASSIGNMENT'
+        head = '📝 ASSIGNMENT ⚠️ expired_' if expired else '📝 ASSIGNMENT'
     elif cat == 'from_site':
         head = '🌐 FROM SITE'
     else:
@@ -141,6 +143,8 @@ def format_caption(n):
     lines = [head, '━━━━━━━━━━━━━━━━', title]
     if cat == 'assignment' and n.get('deadline_ad'):
         lines.append(f"⏰ {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+        if expired:
+            lines.append('⚠️ Status: expired_')
     if (n.get('body') or '').strip():
         lines.append('(full text in next message)')
     return with_top_gap('\n'.join(lines))[:1024]
@@ -312,6 +316,50 @@ class TgMenu:
             if ids:
                 ok_any = True
         return ok_any
+
+    async def send_all_tracked(self, text):
+        """Send to all chats; return telegram refs for later delete/edit."""
+        tg_refs = []
+        for cid in self.chat_ids:
+            ids = await self.send(cid, text, track=False)
+            if ids:
+                tg_refs.append({'chat_id': str(cid), 'message_ids': ids})
+        return tg_refs
+
+    async def apply_expirations(self):
+        """Mark newly expired assignments, tag live posts, drop stale reminder."""
+        rows = store.load_manual()
+        newly = dn.newly_expired_rows(rows)
+        if not newly:
+            return []
+        store.save_manual(rows)
+        for n in newly:
+            label = notice_label(n)
+            print(f'[EXPIRE] {label}')
+            try:
+                await self.update_published_notice(n)
+            except Exception as e:
+                print(f'[EXPIRE] update live fail {label}: {e}')
+        await self._cleanup_reminder_if_needed(newly)
+        return newly
+
+    async def _cleanup_reminder_if_needed(self, newly_expired):
+        rem = store.load_reminder_posts()
+        if not rem:
+            return
+        rem_ids = set(rem.get('notice_ids') or [])
+        if not rem_ids:
+            return
+        hit = any((n.get('id') in rem_ids) for n in (newly_expired or []))
+        if not hit:
+            return
+        print('[EXPIRE] deleting stored reminder messages')
+        fake = {'published': {
+            'telegram': rem.get('telegram') or [],
+            'discord': rem.get('discord') or [],
+        }}
+        await self.delete_published_notice(fake)
+        store.clear_reminder_posts()
 
     async def answer_callback(self, callback_id, text=None, alert=False):
         data = {'callback_query_id': callback_id}
@@ -537,9 +585,8 @@ class TgMenu:
         await self._reset_chat(chat_id)
         if trigger_mid is not None:
             await self._delete_msgs(chat_id, [trigger_mid])
+        await self.apply_expirations()
         rows = store.load_manual()
-        if dn.mark_expired_rows(rows):
-            store.save_manual(rows)
         active = [r for r in rows if r.get('status') != 'expired']
         assigns = [r for r in active if r.get('category') == 'assignment']
         upcoming = dn.deadlines_tomorrow(rows)
@@ -579,9 +626,8 @@ class TgMenu:
     async def show_list(self, chat_id):
         waiting_for_post[str(chat_id)] = False
         await self._reset_chat(chat_id)
+        await self.apply_expirations()
         rows = store.load_manual()
-        if dn.mark_expired_rows(rows):
-            store.save_manual(rows)
         active = [r for r in rows if r.get('status') != 'expired']
         expired = [r for r in rows if r.get('status') == 'expired']
         active = sorted(active, key=lambda r: r.get('created_at', ''), reverse=True)[:15]
@@ -623,9 +669,8 @@ class TgMenu:
     async def show_expired(self, chat_id):
         waiting_for_post[str(chat_id)] = False
         await self._reset_chat(chat_id)
+        await self.apply_expirations()
         rows = store.load_manual()
-        if dn.mark_expired_rows(rows):
-            store.save_manual(rows)
         expired = [r for r in rows if r.get('status') == 'expired']
         expired = sorted(expired, key=lambda r: r.get('deadline_ad') or r.get('created_at', ''), reverse=True)[:20]
         if not expired:

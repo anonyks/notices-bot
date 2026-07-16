@@ -35,6 +35,36 @@ def reminder_path():
     return data_dir() / 'reminder_sent_day.txt'
 
 
+def reminder_posts_path():
+    return data_dir() / 'reminder_posts.json'
+
+
+def load_reminder_posts():
+    path = reminder_posts_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f'[STORE] reminder_posts read error: {e}')
+        return {}
+
+
+def save_reminder_posts(data):
+    path = reminder_posts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data or {}, ensure_ascii=False, indent=2), encoding='utf-8')
+    schedule_gist_backup()
+
+
+def clear_reminder_posts():
+    path = reminder_posts_path()
+    if path.exists():
+        path.write_text('{}\n', encoding='utf-8')
+        schedule_gist_backup()
+
+
 def _load(path):
     if not path.exists():
         return []
@@ -169,6 +199,7 @@ def _snapshot():
         'scraped': _load(scraped_path()),
         'posted': load_posted(),
         'reminder_day': reminder_day(),
+        'reminder_posts': load_reminder_posts(),
     }
 
 
@@ -184,6 +215,12 @@ def _apply_snapshot(data):
         reminder_path().write_text(rem + '\n', encoding='utf-8')
     elif reminder_path().exists():
         reminder_path().write_text('', encoding='utf-8')
+    rem_posts = data.get('reminder_posts')
+    if isinstance(rem_posts, dict):
+        reminder_posts_path().write_text(
+            json.dumps(rem_posts, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
     return True
 
 
@@ -209,6 +246,7 @@ def _migrate_cwd_files():
         'scraped_notices.json',
         'posted.txt',
         'reminder_sent_day.txt',
+        'reminder_posts.json',
     ):
         src = cwd / name
         dst = d / name

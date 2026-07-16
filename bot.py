@@ -613,9 +613,9 @@ async def reminder_loop():
                 await asyncio.sleep(70)
                 continue
 
+            if menu:
+                await menu.apply_expirations()
             rows = store.load_manual()
-            if dn.mark_expired_rows(rows):
-                store.save_manual(rows)
             due = dn.deadlines_tomorrow(rows, now=now)
             if not due:
                 mark_reminder_sent_today()  # empty day — don't re-check all night
@@ -625,11 +625,18 @@ async def reminder_loop():
                 titles = ', '.join((n.get('title') or 'Untitled') for n in due[:5])
                 if len(due) > 5:
                     titles += f' (+{len(due) - 5} more)'
-                tg_ok = await menu.send_all(text)
+                tg_refs = await menu.send_all_tracked(text)
+                tg_ok = bool(tg_refs)
                 disc_refs = await send_discord_text_file(text)
                 disc_ok = bool(disc_refs)
                 if tg_ok or disc_ok:
                     mark_reminder_sent_today()  # only after a successful send attempt
+                    store.save_reminder_posts({
+                        'day': dn.today_npt().isoformat(),
+                        'notice_ids': [n.get('id') for n in due if n.get('id')],
+                        'telegram': tg_refs,
+                        'discord': disc_refs or [],
+                    })
                     print(f'[REMINDER] sent {len(due)} item(s)')
                     await notify_ops(
                         f'⏰ Reminder sent for {len(due)} item(s).\n{titles}\n'
@@ -667,10 +674,13 @@ async def run():
     print('[MONITOR] Monitoring every 10 min...')
     while True:
         try:
-            # expire old assignments quietly
-            rows = store.load_manual()
-            if dn.mark_expired_rows(rows):
-                store.save_manual(rows)
+            # expire old assignments: tag live posts + drop reminder
+            if menu:
+                await menu.apply_expirations()
+            else:
+                rows = store.load_manual()
+                if dn.mark_expired_rows(rows):
+                    store.save_manual(rows)
 
             exam, tcioe = await asyncio.gather(get_exam(), get_tcioe())
             for n in exam + tcioe:
