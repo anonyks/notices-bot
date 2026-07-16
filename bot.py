@@ -121,7 +121,7 @@ async def notify_scrape_error(source, detail):
     if scrape_error_state.get(source) == detail:
         return
     scrape_error_state[source] = detail
-    await notify_ops(f'⚠️ Scrape error: {source}\n{detail}')
+    await notify_ops(f'Scrape error: {source}\n{detail}')
 
 
 def clear_scrape_error(source):
@@ -651,12 +651,12 @@ async def reminder_loop():
                     })
                     print(f'[REMINDER] sent {len(due)} item(s)')
                     await notify_ops(
-                        f'⏰ Reminder sent for {len(due)} item(s).\n{titles}\n'
+                        f'Reminder sent for {len(due)} item(s).\n{titles}\n'
                         f'Telegram: {"ok" if tg_ok else "fail"} | Discord: {"ok" if disc_ok else "fail"}'
                     )
                 else:
                     print('[REMINDER] send failed (tg_ok=False disc_ok=False) — not marking sent')
-                    await notify_ops(f'⚠️ Reminder failed.\n{titles}')
+                    await notify_ops(f'Reminder failed.\n{titles}')
 
             await asyncio.sleep(70)
         except Exception as e:

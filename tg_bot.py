@@ -70,12 +70,12 @@ def format_from_site(title, url):
     title = (title or '').strip() or '(no title)'
     url = (url or '').strip()
     lines = [
-        '🌐 FROM SITE',
+        'FROM SITE',
         '━━━━━━━━━━━━━━━━',
         title,
     ]
     if url:
-        lines += ['', f'🔗 {url}']
+        lines += ['', url]
     return with_top_gap('\n'.join(lines))
 
 
@@ -91,7 +91,7 @@ def format_notice_text(n):
 
     if cat == 'urgent':
         lines = [
-            '🚨🚨 URGENT NOTICE 🚨🚨',
+            'URGENT NOTICE',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
@@ -101,7 +101,7 @@ def format_notice_text(n):
     elif cat == 'assignment':
         expired = n.get('status') == 'expired'
         lines = [
-            '📝 ASSIGNMENT ⚠️ expired_' if expired else '📝 ASSIGNMENT',
+            'ASSIGNMENT  ·  expired_' if expired else 'ASSIGNMENT',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
@@ -109,7 +109,7 @@ def format_notice_text(n):
             lines += ['', body]
     else:
         lines = [
-            '📢 GENERAL NOTICE',
+            'GENERAL NOTICE',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
@@ -117,13 +117,13 @@ def format_notice_text(n):
             lines += ['', body]
 
     if cat == 'assignment' and n.get('deadline_ad'):
-        lines += ['', f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
+        lines += ['', f"Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
         if n.get('status') == 'expired':
-            lines.append('⚠️ Status: expired_')
+            lines.append('Status: expired_')
     if n.get('file_name'):
-        lines += ['', f"📎 {n.get('file_name')}"]
+        lines += ['', f"File: {n.get('file_name')}"]
     elif n.get('file_type'):
-        lines += ['', f"📎 Attachment: {n.get('file_type')}"]
+        lines += ['', f"Attachment: {n.get('file_type')}"]
     return with_top_gap('\n'.join(lines))
 
 
@@ -133,18 +133,18 @@ def format_caption(n):
     title = (n.get('title') or '').strip() or '(no title)'
     expired = n.get('status') == 'expired'
     if cat == 'urgent':
-        head = '🚨🚨 URGENT NOTICE 🚨🚨'
+        head = 'URGENT NOTICE'
     elif cat == 'assignment':
-        head = '📝 ASSIGNMENT ⚠️ expired_' if expired else '📝 ASSIGNMENT'
+        head = 'ASSIGNMENT  ·  expired_' if expired else 'ASSIGNMENT'
     elif cat == 'from_site':
-        head = '🌐 FROM SITE'
+        head = 'FROM SITE'
     else:
-        head = '📢 GENERAL NOTICE'
+        head = 'GENERAL NOTICE'
     lines = [head, '━━━━━━━━━━━━━━━━', title]
     if cat == 'assignment' and n.get('deadline_ad'):
-        lines.append(f"⏰ {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+        lines.append(f"Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
         if expired:
-            lines.append('⚠️ Status: expired_')
+            lines.append('Status: expired_')
     if (n.get('body') or '').strip():
         lines.append('(full text in next message)')
     return with_top_gap('\n'.join(lines))[:1024]
@@ -160,18 +160,18 @@ def tg_media_parts(notice):
 
 def format_reminder_bundle(items):
     lines = [
-        '⏰ DEADLINE REMINDER',
+        'DEADLINE REMINDER',
         '━━━━━━━━━━━━━━━━',
         'Due TOMORROW (Nepal time)',
         '',
     ]
     for i, n in enumerate(items, 1):
         title = n.get('title', 'Untitled')
-        lines.append(f'{i}. 📝 {title}')
-        lines.append(f"   ⏰ {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+        lines.append(f'{i}. {title}')
+        lines.append(f"   {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
         lines.append('')
     lines.append('━━━━━━━━━━━━━━━━')
-    lines.append('Finish it before midnight 💪')
+    lines.append('Finish it before midnight.')
     return with_top_gap('\n'.join(lines))
 
 
@@ -347,7 +347,7 @@ class TgMenu:
             names = ', '.join(titles[:5])
             if len(titles) > 5:
                 names += f' (+{len(titles) - 5} more)'
-            await self.send_all(f'⏰ expired_ tagged ({len(newly)}):\n{names}')
+            await self.send_all(f'expired_ tagged ({len(newly)}):\n{names}')
         except Exception as e:
             print(f'[EXPIRE] notify fail: {e}')
         return newly
@@ -660,7 +660,7 @@ class TgMenu:
         for r in active:
             extra = ''
             if r.get('deadline_ad'):
-                extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}"
+                extra = f" | {dn.format_deadline_short(r['deadline_ad'])}"
             lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         upcoming = dn.deadlines_tomorrow(rows)
         if upcoming:
@@ -697,7 +697,7 @@ class TgMenu:
             return
         lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
         for r in expired:
-            extra = f" | ⏰ {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
+            extra = f" | {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
             lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         await self.send(chat_id, '\n'.join(lines), reply_markup=inline([
             [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
@@ -1060,7 +1060,7 @@ class TgMenu:
 
     async def _show_preview(self, chat_id, sess):
         draft = sess['draft']
-        text = '📣 PREVIEW — tap Publish to send\n\n' + format_notice_text(draft)
+        text = 'PREVIEW — tap Publish to send\n\n' + format_notice_text(draft)
         await self.send(
             chat_id,
             text,
