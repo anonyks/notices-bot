@@ -101,7 +101,7 @@ def format_notice_text(n):
     elif cat == 'assignment':
         expired = n.get('status') == 'expired'
         lines = [
-            'ASSIGNMENT  ·  expired_' if expired else 'ASSIGNMENT',
+            '📝 ASSIGNMENT  ·  _expired_' if expired else '📝 ASSIGNMENT',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
@@ -117,13 +117,13 @@ def format_notice_text(n):
             lines += ['', body]
 
     if cat == 'assignment' and n.get('deadline_ad'):
-        lines += ['', f"Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
+        lines += ['', f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
         if n.get('status') == 'expired':
-            lines.append('Status: expired_')
+            lines.append('Status: _expired_')
     if n.get('file_name'):
-        lines += ['', f"File: {n.get('file_name')}"]
+        lines += ['', f"📎 {n.get('file_name')}"]
     elif n.get('file_type'):
-        lines += ['', f"Attachment: {n.get('file_type')}"]
+        lines += ['', f"📎 Attachment: {n.get('file_type')}"]
     return with_top_gap('\n'.join(lines))
 
 
@@ -135,16 +135,16 @@ def format_caption(n):
     if cat == 'urgent':
         head = 'URGENT NOTICE'
     elif cat == 'assignment':
-        head = 'ASSIGNMENT  ·  expired_' if expired else 'ASSIGNMENT'
+        head = '📝 ASSIGNMENT  ·  _expired_' if expired else '📝 ASSIGNMENT'
     elif cat == 'from_site':
         head = 'FROM SITE'
     else:
         head = 'GENERAL NOTICE'
     lines = [head, '━━━━━━━━━━━━━━━━', title]
     if cat == 'assignment' and n.get('deadline_ad'):
-        lines.append(f"Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+        lines.append(f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
         if expired:
-            lines.append('Status: expired_')
+            lines.append('Status: _expired_')
     if (n.get('body') or '').strip():
         lines.append('(full text in next message)')
     return with_top_gap('\n'.join(lines))[:1024]
@@ -348,7 +348,7 @@ class TgMenu:
             names = ', '.join(titles[:5])
             if len(titles) > 5:
                 names += f' (+{len(titles) - 5} more)'
-            await self.send_all(f'expired_ tagged ({len(newly)}):\n{names}')
+            await self.send_all(f'_expired_ tagged ({len(newly)}):\n{names}')
         except Exception as e:
             print(f'[EXPIRE] notify fail: {e}')
         return newly
