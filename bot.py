@@ -73,6 +73,25 @@ if not w1 and not w2:
 offset = 0
 http = None
 menu = None
+discord_lock = asyncio.Lock()
+discord_cooldown_until = 0.0
+
+
+PROXY_HOSTS = [
+    'p.webshare.io:80:fexpjpkd-rotate:rx3hdyggy83o',
+    'p.webshare.io:80:jtvvlemp-rotate:0fzy5ooc6rn3',
+    'p.webshare.io:80:udvdinld-rotate:y3j6holjigwx',
+    'p.webshare.io:80:zyqxlgxy-rotate:577vhwv9e3fv',
+    'p.webshare.io:80:cgiyhodh-rotate:yjci8dset9za',
+    'p.webshare.io:80:kuqjlqsv-6:5k7q3uq6o6j5',
+    'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
+    'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
+    'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
+    'p.webshare.io:80:dctxwewh-rotate:cb8a3yevk88c',
+    'p.webshare.io:80:nckjgccq-rotate:a5gylwfr5l22',
+    'p.webshare.io:80:cihjvsyy-rotate:dwcbfsv8dch8',
+    'p.webshare.io:80:kuqjlqsv-10:5k7q3uq6o6j5',
+]
 
 
 def get_saved():
@@ -85,37 +104,12 @@ def save(link):
 
 # tcioe blocks direct requests; rotate through webshare proxies
 def _proxy_url():
-    proxies_list = [
-        'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
-        'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
-        'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
-        'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
-        'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
-        'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
-        'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
-        'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
-        'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
-        'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
-        'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf',
-    ]
-    host, port, user, pwd = random.choice(proxies_list).split(':')
+    host, port, user, pwd = random.choice(PROXY_HOSTS).split(':')
     return f'http://{user}:{pwd}@{host}:{port}'
 
 
 def _proxy_urls():
-    proxies_list = [
-        'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
-        'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
-        'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
-        'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
-        'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
-        'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
-        'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
-        'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
-        'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
-        'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
-        'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf',
-    ]
+    proxies_list = list(PROXY_HOSTS)
     random.shuffle(proxies_list)
     out = []
     for raw in proxies_list:
@@ -284,28 +278,73 @@ def _attachments_from_medias(medias):
 
 
 async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tries=3):
-    """Retry webhook posts on Discord rate limits."""
-    last = None
-    for attempt in range(1, tries + 1):
-        last = await http.post(url, json=json, data=data, files=files, timeout=timeout)
-        if last.status_code != 429:
-            return last
+    """Retry webhook posts with one-at-a-time queue, cooldown, and proxy fallback."""
+    global discord_cooldown_until
+
+    def retry_after_seconds(resp):
         retry_after = 2.0
         try:
-            retry_after = float((last.json() or {}).get('retry_after') or retry_after)
+            retry_after = float((resp.json() or {}).get('retry_after') or retry_after)
         except Exception:
             pass
-        header_retry = last.headers.get('Retry-After')
+        header_retry = resp.headers.get('Retry-After')
         if header_retry:
             try:
                 retry_after = float(header_retry)
             except Exception:
                 pass
-        retry_after = min(max(retry_after, 1.0), 30.0)
-        print(f'discord: 429 retry in {retry_after}s (try {attempt}/{tries})')
-        if attempt < tries:
-            await asyncio.sleep(retry_after)
-    return last
+        return min(max(retry_after, 1.0), 30.0)
+
+    def is_global_block(resp):
+        text = (resp.text or '').lower()
+        return 'global rate limits' in text or 'blocked from accessing our api temporarily' in text
+
+    async def post_once(proxy=None):
+        if proxy:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=timeout) as client:
+                return await client.post(url, json=json, data=data, files=files)
+        return await http.post(url, json=json, data=data, files=files, timeout=timeout)
+
+    async with discord_lock:
+        loop = asyncio.get_running_loop()
+        last = None
+        routes = [None]
+        proxy_count = 0
+
+        for attempt in range(1, tries + 1):
+            now = loop.time()
+            if discord_cooldown_until > now:
+                wait = discord_cooldown_until - now
+                print(f'discord: cooldown {wait:.1f}s')
+                await asyncio.sleep(wait)
+
+            hit_backoff = False
+            for proxy in routes:
+                last = await post_once(proxy=proxy)
+                if last.status_code != 429:
+                    return last
+
+                retry_after = retry_after_seconds(last)
+                route_name = 'proxy' if proxy else 'direct'
+
+                if is_global_block(last):
+                    discord_cooldown_until = max(discord_cooldown_until, loop.time() + retry_after)
+                    if proxy is None and proxy_count == 0:
+                        routes = [None] + _proxy_urls()[:4]
+                        proxy_count = len(routes) - 1
+                        print(f'discord: direct route blocked, trying {proxy_count} proxies')
+                        continue
+                    print(f'discord: global 429 on {route_name}, trying next route')
+                    continue
+
+                discord_cooldown_until = max(discord_cooldown_until, loop.time() + retry_after)
+                print(f'discord: 429 {route_name} retry in {retry_after}s (try {attempt}/{tries})')
+                hit_backoff = True
+                break
+
+            if attempt < tries and (hit_backoff or last is not None):
+                continue
+        return last
 
 
 async def send_discord(title, url, medias):
