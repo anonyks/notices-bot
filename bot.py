@@ -102,6 +102,28 @@ def _proxy_url():
     return f'http://{user}:{pwd}@{host}:{port}'
 
 
+def _proxy_urls():
+    proxies_list = [
+        'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
+        'p.webshare.io:80:webhchrs-rotate:gqrtdw324djs',
+        'p.webshare.io:80:junpudme-rotate:ghfzxsgqq937',
+        'p.webshare.io:80:qehdxkfz-rotate:8l7mty6wkt0j',
+        'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
+        'p.webshare.io:80:nqahuvka-rotate:9s3475medym6',
+        'p.webshare.io:80:rckrqady-rotate:gjx9mtdykoqj',
+        'p.webshare.io:80:cukvurbu-rotate:s1kz6oi05y68',
+        'p.webshare.io:80:cblgmspz-rotate:idjmw77z4d5l',
+        'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
+        'p.webshare.io:80:ahfccqoh-rotate:18ntdktea2cf',
+    ]
+    random.shuffle(proxies_list)
+    out = []
+    for raw in proxies_list:
+        host, port, user, pwd = raw.split(':')
+        out.append(f'http://{user}:{pwd}@{host}:{port}')
+    return out
+
+
 async def get_exam():
     try:
         r = await http.get(
@@ -129,15 +151,31 @@ async def get_exam():
 
 
 async def get_tcioe():
+    url = 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at'
+    headers = {'User-Agent': UA, 'Accept': 'application/json'}
     try:
-        proxy = _proxy_url()
-        async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
-            r = await client.get(
-                'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at',
-                headers={'User-Agent': UA, 'Accept': 'application/json'},
-            )
-        if r.status_code != 200:
-            print(f'tcioe: HTTP {r.status_code}')
+        r = None
+        last_status = None
+        for proxy in _proxy_urls()[:4]:
+            try:
+                async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
+                    r = await client.get(url, headers=headers)
+                if r.status_code == 200:
+                    break
+                last_status = r.status_code
+                if r.status_code == 402:
+                    continue
+                print(f'tcioe: HTTP {r.status_code}')
+                return []
+            except Exception:
+                continue
+        if r is None or r.status_code != 200:
+            if last_status == 402:
+                print('tcioe: proxy 402 on all retries')
+            elif last_status is not None:
+                print(f'tcioe: HTTP {last_status}')
+            else:
+                print('tcioe: request failed on all retries')
             return []
 
         d = r.json()
@@ -245,7 +283,34 @@ def _attachments_from_medias(medias):
     return prefer_pdf_over_images(out)
 
 
+async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tries=3):
+    """Retry webhook posts on Discord rate limits."""
+    last = None
+    for attempt in range(1, tries + 1):
+        last = await http.post(url, json=json, data=data, files=files, timeout=timeout)
+        if last.status_code != 429:
+            return last
+        retry_after = 2.0
+        try:
+            retry_after = float((last.json() or {}).get('retry_after') or retry_after)
+        except Exception:
+            pass
+        header_retry = last.headers.get('Retry-After')
+        if header_retry:
+            try:
+                retry_after = float(header_retry)
+            except Exception:
+                pass
+        retry_after = min(max(retry_after, 1.0), 30.0)
+        print(f'discord: 429 retry in {retry_after}s (try {attempt}/{tries})')
+        if attempt < tries:
+            await asyncio.sleep(retry_after)
+    return last
+
+
 async def send_discord(title, url, medias):
+    """Send to Discord webhooks. Returns True if at least one post succeeded."""
+    posted_any = False
     for w in [w1, w2]:
         if not w:
             continue
@@ -261,21 +326,30 @@ async def send_discord(title, url, medias):
                             fn = item['url'].split('/')[-1].split('?')[0] or (
                                 'image.png' if item['kind'] == 'image' else 'file.pdf'
                             )
-                            await http.post(
+                            r = await _discord_post(
                                 w,
                                 data={'content': msg[:1900]},
                                 files={'file': (fn, pr.content)},
                                 timeout=30,
                             )
-                            print(f'discord: {fn}')
-                            msg = ''
+                            if r.status_code in (200, 201, 204):
+                                print(f'discord: {fn}')
+                                posted_any = True
+                                msg = ''
+                            else:
+                                print(f'discord HTTP {r.status_code}: {r.text[:200]}')
                     except Exception as e:
                         print(f'discord file error: {e}')
             else:
-                await http.post(w, json={'content': msg[:1900]}, timeout=10)
-                print('discord: sent')
+                r = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
+                if r.status_code in (200, 201, 204):
+                    print('discord: sent')
+                    posted_any = True
+                else:
+                    print(f'discord HTTP {r.status_code}: {r.text[:200]}')
         except Exception as e:
             print(f'discord error: {e}')
+    return posted_any
 
 
 async def send_discord_text_file(caption, file_bytes=None, filename=None):
@@ -288,14 +362,14 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None):
             # wait=true so Discord returns the message id (needed for edit/delete)
             url = w if 'wait=' in w else (w + ('&' if '?' in w else '?') + 'wait=true')
             if file_bytes and filename:
-                r = await http.post(
+                r = await _discord_post(
                     url,
                     data={'content': caption[:1900]},
                     files={'file': (filename, file_bytes)},
                     timeout=30,
                 )
             else:
-                r = await http.post(url, json={'content': caption[:1900]}, timeout=10)
+                r = await _discord_post(url, json={'content': caption[:1900]}, timeout=10)
             if r.status_code in (200, 201):
                 try:
                     mid = r.json().get('id')
@@ -338,8 +412,10 @@ async def delete_discord_message(webhook_url, message_id):
 
 
 async def send_telegram(title, url, medias):
+    """Send to Telegram chats. Returns True if at least one send succeeded."""
+    posted_any = False
     if not tg_token:
-        return
+        return False
     try:
         msg = format_from_site(title, url)
         files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
@@ -363,20 +439,26 @@ async def send_telegram(title, url, medias):
                             )
                         if r.status_code == 200:
                             print('telegram: sent')
+                            posted_any = True
                             local_msg = ''
                         else:
                             print(f'telegram media HTTP {r.status_code}: {r.text[:200]}')
                     except Exception as e:
                         print(f'telegram media error: {e}')
             else:
-                await http.post(
+                r = await http.post(
                     f'https://api.telegram.org/bot{tg_token}/sendMessage',
                     data={'chat_id': chat_id, 'text': msg},
                     timeout=10,
                 )
-                print('telegram: sent')
+                if r.status_code == 200:
+                    print('telegram: sent')
+                    posted_any = True
+                else:
+                    print(f'telegram HTTP {r.status_code}: {r.text[:200]}')
     except Exception as e:
         print(f'telegram error: {e}')
+    return posted_any
 
 
 async def poll():
@@ -452,10 +534,14 @@ async def reminder_loop():
                 print('[REMINDER] nothing due tomorrow')
             else:
                 text = format_reminder_bundle(due)
-                await menu.send_all(text)
-                await send_discord_text_file(text)
-                mark_reminder_sent_today()  # only after a successful send attempt
-                print(f'[REMINDER] sent {len(due)} item(s)')
+                tg_ok = await menu.send_all(text)
+                disc_refs = await send_discord_text_file(text)
+                disc_ok = bool(disc_refs)
+                if tg_ok or disc_ok:
+                    mark_reminder_sent_today()  # only after a successful send attempt
+                    print(f'[REMINDER] sent {len(due)} item(s)')
+                else:
+                    print('[REMINDER] send failed (tg_ok=False disc_ok=False) — not marking sent')
 
             await asyncio.sleep(70)
         except Exception as e:
@@ -494,8 +580,11 @@ async def run():
             for n in exam + tcioe:
                 if n['link'] not in posted:
                     print(f"[MONITOR] NEW: {n['title']}")
-                    await send_discord(n['title'], n['link'], n.get('medias'))
-                    await send_telegram(n['title'], n['link'], n.get('medias'))
+                    discord_ok = await send_discord(n['title'], n['link'], n.get('medias'))
+                    telegram_ok = await send_telegram(n['title'], n['link'], n.get('medias'))
+                    if not (discord_ok or telegram_ok):
+                        print('[MONITOR] both sends failed — not saving posted marker')
+                        continue
                     store.append_scraped({
                         'category': 'from_site',
                         'title': n['title'],

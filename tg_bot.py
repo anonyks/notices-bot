@@ -293,8 +293,12 @@ class TgMenu:
         self._clear(chat_id)
 
     async def send_all(self, text):
+        ok_any = False
         for cid in self.chat_ids:
-            await self.send(cid, text)
+            ids = await self.send(cid, text)
+            if ids:
+                ok_any = True
+        return ok_any
 
     async def answer_callback(self, callback_id, text=None, alert=False):
         data = {'callback_query_id': callback_id}
