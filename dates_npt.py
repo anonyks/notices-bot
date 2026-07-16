@@ -124,4 +124,6 @@ def seconds_until_next_6pm_npt(now=None):
     target = datetime.combine(now.date(), time(18, 0, 0), tzinfo=NPT)
     if now >= target:
         target = target + timedelta(days=1)
-    return max(1, int((target - now).total_seconds()))
+    # ceil-ish so we don't wake a fraction of a second before 18:00
+    secs = (target - now).total_seconds()
+    return max(1, int(secs) + 1)

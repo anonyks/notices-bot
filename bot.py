@@ -597,16 +597,28 @@ async def reminder_loop():
     print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
     while True:
         try:
-            wait_s = dn.seconds_until_next_6pm_npt()
-            print(f'[REMINDER] sleeping {wait_s}s until next 6pm NPT')
-            await asyncio.sleep(wait_s)
-
             now = dn.now_npt()
-            # only fire near 6pm; if we missed the window, skip (no catch-up)
-            if now.hour != 18:
-                print(f'[REMINDER] skip — not 6pm window (hour={now.hour})')
-                await asyncio.sleep(30)
-                continue
+            # already inside today's 6pm hour and not sent yet (redeploy / early-wake recovery)
+            in_window = (now.hour == 18 and not reminder_already_sent_today())
+            if not in_window:
+                wait_s = dn.seconds_until_next_6pm_npt()
+                print(f'[REMINDER] sleeping {wait_s}s until next 6pm NPT')
+                await asyncio.sleep(wait_s)
+
+                now = dn.now_npt()
+                # sleep can wake slightly early (hour still 17) — wait into the real 18:00 window
+                if now.hour < 18:
+                    target = now.replace(hour=18, minute=0, second=0, microsecond=0)
+                    extra = max(1, int((target - now).total_seconds()) + 1)
+                    print(f'[REMINDER] woke early (hour={now.hour}) — waiting {extra}s more')
+                    await asyncio.sleep(extra)
+                    now = dn.now_npt()
+
+                # missed the 6pm hour entirely (e.g. long stall) — no catch-up
+                if now.hour != 18:
+                    print(f'[REMINDER] skip — not 6pm window (hour={now.hour})')
+                    await asyncio.sleep(70)
+                    continue
 
             if reminder_already_sent_today():
                 print('[REMINDER] already sent today — skip')
