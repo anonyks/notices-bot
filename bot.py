@@ -52,12 +52,14 @@ w1 = (os.getenv('DISCORD_WEBHOOK1') or '').strip()
 w2 = (os.getenv('DISCORD_WEBHOOK2') or '').strip()
 tg_token = (os.getenv('TELEGRAM_TOKEN') or '').strip()
 tg_chat_ids = parse_chat_ids(os.getenv('TELEGRAM_CHAT_ID') or '')
-# self-ping so Render free tier doesnt sleep
+# self-ping so Render free tier doesnt sleep (must hit public URL, not localhost)
 health_ping_url = (
     (os.getenv('HEALTH_PING_URL') or '').strip()
     or (os.getenv('RENDER_EXTERNAL_URL') or '').strip()
     or 'https://notices-bot.onrender.com'
 )
+# Render free spins down ~15 min without inbound HTTP — ping sooner than that
+KEEPALIVE_EVERY = int(os.getenv('KEEPALIVE_EVERY', '300'))  # 5 min
 
 if not tg_token or not tg_chat_ids:
     print('ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set!')
@@ -483,13 +485,6 @@ async def run():
     print('[MONITOR] Monitoring every 10 min...')
     while True:
         try:
-            # self-ping to keep render awake
-            if health_ping_url:
-                try:
-                    await http.get(health_ping_url.rstrip('/') + '/', timeout=5)
-                except Exception as e:
-                    print(f'[HEALTH] ping failed: {e}')
-
             # expire old assignments quietly
             rows = store.load_manual()
             if dn.mark_expired_rows(rows):
@@ -515,6 +510,24 @@ async def run():
             await asyncio.sleep(CHECK_EVERY)
 
 
+async def keepalive_loop():
+    """Hit our public URL on a timer so Render free tier stays awake."""
+    url = (health_ping_url or '').rstrip('/') + '/'
+    if not url or url == '/':
+        print('[HEALTH] keepalive off (no HEALTH_PING_URL)')
+        return
+    print(f'[HEALTH] keepalive every {KEEPALIVE_EVERY}s → {url}')
+    # first ping soon after boot (don't wait a full interval)
+    await asyncio.sleep(15)
+    while True:
+        try:
+            r = await http.get(url, timeout=10)
+            print(f'[HEALTH] ping {r.status_code}')
+        except Exception as e:
+            print(f'[HEALTH] ping failed: {e}')
+        await asyncio.sleep(KEEPALIVE_EVERY)
+
+
 async def main():
     global http, menu
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -528,7 +541,7 @@ async def main():
             edit_discord_message=edit_discord_message,
             delete_discord_message=delete_discord_message,
         )
-        await asyncio.gather(run(), poll(), reminder_loop())
+        await asyncio.gather(run(), poll(), reminder_loop(), keepalive_loop())
 
 
 # health server in background, then run monitor + telegram
