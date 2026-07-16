@@ -35,7 +35,7 @@ Buttons: **Create / List / Edit / Delete / Status**
 Edit title/body/deadline; optional **Update live posts** edits the same TG/Discord messages (does not spam a new one).
 Delete removes JSON **and** the live TG/Discord messages when message IDs were saved at publish.
 
-Reminders: **6:00 PM Nepal time** for assignments due **tomorrow** (combined message). Missed 6pm is not retried.
+Reminders: **6:00 PM** for assignments due **tomorrow** (combined message). Missed 6pm is not retried.
 
 Storage: `manual_notices.json`, `scraped_notices.json`
 

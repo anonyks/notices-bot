@@ -79,6 +79,18 @@ discord_direct_blocked_until = 0.0
 scrape_error_state = {'exam': '', 'tcioe': ''}
 
 
+def discord_escape(text):
+    """Keep Discord from eating newlines / turning _expired_ into italics."""
+    if not text:
+        return text
+    out = str(text)
+    # backslash first
+    out = out.replace('\\', '\\\\')
+    for ch in ('`', '*', '_', '~', '|'):
+        out = out.replace(ch, '\\' + ch)
+    return out
+
+
 PROXY_HOSTS = [
     'p.webshare.io:80:fexpjpkd-rotate:rx3hdyggy83o',
     'p.webshare.io:80:jtvvlemp-rotate:0fzy5ooc6rn3',
@@ -403,7 +415,7 @@ async def send_discord(title, url, medias):
         if not w:
             continue
         try:
-            msg = format_from_site(title, url)
+            msg = discord_escape(format_from_site(title, url))
             files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
 
             if files:
@@ -449,15 +461,16 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None):
         try:
             # wait=true so Discord returns the message id (needed for edit/delete)
             url = w if 'wait=' in w else (w + ('&' if '?' in w else '?') + 'wait=true')
+            body = discord_escape(caption or '')
             if file_bytes and filename:
                 r = await _discord_post(
                     url,
-                    data={'content': caption[:1900]},
+                    data={'content': body[:1900]},
                     files={'file': (filename, file_bytes)},
                     timeout=30,
                 )
             else:
-                r = await _discord_post(url, json={'content': caption[:1900]}, timeout=10)
+                r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
             if r.status_code in (200, 201):
                 try:
                     mid = r.json().get('id')
@@ -480,7 +493,7 @@ async def edit_discord_message(webhook_url, message_id, content):
         base = webhook_url.split('?')[0]
         r = await http.patch(
             f'{base}/messages/{message_id}',
-            json={'content': content[:2000]},
+            json={'content': discord_escape(content or '')[:2000]},
             timeout=15,
         )
         return r.status_code in (200, 204)
