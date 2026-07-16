@@ -76,6 +76,7 @@ menu = None
 discord_lock = asyncio.Lock()
 discord_cooldown_until = 0.0
 discord_direct_blocked_until = 0.0
+scrape_error_state = {'exam': '', 'tcioe': ''}
 
 
 PROXY_HOSTS = [
@@ -101,6 +102,30 @@ def get_saved():
 
 def save(link):
     store.append_posted(link)
+
+
+async def notify_ops(text):
+    """Send a short operator message to all Telegram chats."""
+    if not menu:
+        return False
+    try:
+        ok = await menu.send_all(text)
+        return bool(ok)
+    except Exception as e:
+        print(f'[OPS] notify error: {e}')
+        return False
+
+
+async def notify_scrape_error(source, detail):
+    detail = (detail or '').strip()[:300]
+    if scrape_error_state.get(source) == detail:
+        return
+    scrape_error_state[source] = detail
+    await notify_ops(f'⚠️ Scrape error: {source}\n{detail}')
+
+
+def clear_scrape_error(source):
+    scrape_error_state[source] = ''
 
 
 # tcioe blocks direct requests; rotate through webshare proxies
@@ -139,9 +164,11 @@ async def get_exam():
                 notices.append({'link': h, 'title': t, 'medias': None})
                 seen.add(h)
         print(f'exam: {len(notices)}')
+        clear_scrape_error('exam')
         return notices
     except Exception as e:
         print(f'exam error: {e}')
+        await notify_scrape_error('exam', str(e))
         return []
 
 
@@ -161,16 +188,20 @@ async def get_tcioe():
                 if r.status_code == 402:
                     continue
                 print(f'tcioe: HTTP {r.status_code}')
+                await notify_scrape_error('tcioe', f'HTTP {r.status_code}')
                 return []
             except Exception:
                 continue
         if r is None or r.status_code != 200:
             if last_status == 402:
                 print('tcioe: proxy 402 on all retries')
+                await notify_scrape_error('tcioe', 'proxy 402 on all retries')
             elif last_status is not None:
                 print(f'tcioe: HTTP {last_status}')
+                await notify_scrape_error('tcioe', f'HTTP {last_status}')
             else:
                 print('tcioe: request failed on all retries')
+                await notify_scrape_error('tcioe', 'request failed on all retries')
             return []
 
         d = r.json()
@@ -182,9 +213,11 @@ async def get_tcioe():
                 'medias': i.get('medias', []),
             })
         print(f'tcioe: {len(notices)}')
+        clear_scrape_error('tcioe')
         return notices
     except Exception as e:
         print(f'tcioe error: {e}')
+        await notify_scrape_error('tcioe', str(e))
         return []
 
 
@@ -589,14 +622,22 @@ async def reminder_loop():
                 print('[REMINDER] nothing due tomorrow')
             else:
                 text = format_reminder_bundle(due)
+                titles = ', '.join((n.get('title') or 'Untitled') for n in due[:5])
+                if len(due) > 5:
+                    titles += f' (+{len(due) - 5} more)'
                 tg_ok = await menu.send_all(text)
                 disc_refs = await send_discord_text_file(text)
                 disc_ok = bool(disc_refs)
                 if tg_ok or disc_ok:
                     mark_reminder_sent_today()  # only after a successful send attempt
                     print(f'[REMINDER] sent {len(due)} item(s)')
+                    await notify_ops(
+                        f'⏰ Reminder sent for {len(due)} item(s).\n{titles}\n'
+                        f'Telegram: {"ok" if tg_ok else "fail"} | Discord: {"ok" if disc_ok else "fail"}'
+                    )
                 else:
                     print('[REMINDER] send failed (tg_ok=False disc_ok=False) — not marking sent')
+                    await notify_ops(f'⚠️ Reminder failed.\n{titles}')
 
             await asyncio.sleep(70)
         except Exception as e:
