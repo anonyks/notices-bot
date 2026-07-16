@@ -189,6 +189,19 @@ def mark_reminder_sent_today():
     store.set_reminder_day(dn.today_npt().isoformat())
 
 
+def delivery_summary(published):
+    published = published or {}
+    tg_ok = bool(published.get('telegram') or [])
+    dc_ok = bool(published.get('discord') or [])
+    if tg_ok and dc_ok:
+        return 'Posted to Telegram and Discord.'
+    if tg_ok:
+        return 'Posted to Telegram only. Discord failed.'
+    if dc_ok:
+        return 'Posted to Discord only. Telegram failed.'
+    return 'Post failed on both Telegram and Discord.'
+
+
 class TgMenu:
     def __init__(
         self,
@@ -329,6 +342,8 @@ class TgMenu:
             r = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': full})
             if r.get('ok'):
                 ids.append(r['result']['message_id'])
+            else:
+                print(f'tg send fail chat={chat_id}: {r}')
             return ids
 
         caption, followup = tg_media_parts(notice)
@@ -342,11 +357,15 @@ class TgMenu:
             })
         if r.get('ok'):
             ids.append(r['result']['message_id'])
+        else:
+            print(f'tg media fail chat={chat_id}: {r}')
 
         if followup:
             r2 = await self.api_post('sendMessage', data={'chat_id': chat_id, 'text': followup})
             if r2.get('ok'):
                 ids.append(r2['result']['message_id'])
+            else:
+                print(f'tg followup fail chat={chat_id}: {r2}')
         return ids
 
     async def publish_notice(self, notice):
@@ -439,8 +458,9 @@ class TgMenu:
         return published
 
     async def delete_published_notice(self, notice):
-        """Delete previously posted TG + Discord messages."""
+        """Delete previously posted TG + Discord messages. Returns True if all cleared."""
         published = notice.get('published') or {}
+        ok_all = True
         for ref in published.get('telegram') or []:
             cid = ref.get('chat_id')
             for mid in ref.get('message_ids') or []:
@@ -449,12 +469,15 @@ class TgMenu:
                     'message_id': mid,
                 })
                 if not r.get('ok'):
+                    ok_all = False
                     print(f'tg delete fail chat={cid} mid={mid}: {r}')
         if self.delete_discord_message:
             for ref in published.get('discord') or []:
                 ok = await self.delete_discord_message(ref.get('webhook_url'), ref.get('message_id'))
                 if not ok:
+                    ok_all = False
                     print(f'discord delete fail: {ref}')
+        return ok_all
 
     async def _download_tg_file(self, file_id):
         info = await self.api_post('getFile', data={'file_id': file_id})
@@ -838,10 +861,11 @@ class TgMenu:
             if preview_mid is not None and int(preview_mid) not in wizard_ids:
                 wizard_ids.append(int(preview_mid))
             notice = store.add_manual(deepcopy(draft))
-            await self.answer_callback(cq['id'], f"Published {notice_label(notice, 40)}")
+            await self.answer_callback(cq['id'], f"Publishing {notice_label(notice, 40)}")
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
-            await self.publish_notice(notice)
+            published = await self.publish_notice(notice)
+            await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
             return
 
         if data.startswith('edit:republish:'):
@@ -855,10 +879,11 @@ class TgMenu:
                 await self._delete_msgs(chat_id, wizard_ids)
                 self._clear(chat_id)
                 return
-            await self.answer_callback(cq['id'], f'Updated {notice_label(n, 40)}')
+            await self.answer_callback(cq['id'], f'Updating {notice_label(n, 40)}')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
-            await self.update_published_notice(n)
+            published = await self.update_published_notice(n)
+            await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
             return
 
         if data.startswith('edit:done:'):
@@ -937,12 +962,20 @@ class TgMenu:
             wizard_ids = list(sess.get('wizard_msgs') or [])
             if cq_mid is not None and int(cq_mid) not in wizard_ids:
                 wizard_ids.append(int(cq_mid))
+            live_ok = True
             if n:
-                await self.delete_published_notice(n)
+                live_ok = await self.delete_published_notice(n)
             ok = store.delete_manual(nid)
             await self.answer_callback(cq['id'], f'Deleted {label}'[:200] if ok else 'Not found')
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
+            if ok and n and not live_ok:
+                await self.send(
+                    chat_id,
+                    f'Deleted {notice_label(n)} from store, but some old Telegram/Discord posts may remain.',
+                    reply_markup=main_reply_keyboard(),
+                    track=False,
+                )
             return
 
     async def _ask_calendar(self, chat_id, prefix='create'):
@@ -1044,9 +1077,8 @@ class TgMenu:
                 content = txt[6:].strip()
                 if content:
                     await self._delete_msgs(chat_id, [msg.get('message_id')])
-                    await self.send_discord_text_file(f'info_s\n\n{content}')
-                    for cid in self.chat_ids:
-                        await self.send(cid, f'🎤 info_s\n\n{content}', track=False)
+                    published = await self._post_quick_text(content)
+                    await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
                 return
             await self.cmd_post(chat_id, trigger_mid=msg.get('message_id'))
             return
@@ -1166,6 +1198,39 @@ class TgMenu:
             ]),
         )
 
+    async def _post_quick_text(self, txt):
+        tg_refs = []
+        for cid in self.chat_ids:
+            ids = await self.send(cid, f'🎤 info_s\n\n{txt}', track=False)
+            if ids:
+                tg_refs.append({'chat_id': str(cid), 'message_ids': ids})
+        disc_refs = await self.send_discord_text_file(f'info_s\n\n{txt}') or []
+        return {'telegram': tg_refs, 'discord': disc_refs}
+
+    async def _post_quick_media(self, file_id, kind, caption, filename=None):
+        tg_refs = []
+        cap = f'📄 {caption}'[:1024]
+        for cid in self.chat_ids:
+            if kind == 'photo':
+                r = await self.api_post('sendPhoto', data={
+                    'chat_id': cid, 'photo': file_id, 'caption': cap
+                })
+            else:
+                r = await self.api_post('sendDocument', data={
+                    'chat_id': cid, 'document': file_id, 'caption': cap
+                })
+            if r.get('ok'):
+                tg_refs.append({'chat_id': str(cid), 'message_ids': [r['result']['message_id']]})
+            else:
+                print(f'quick post tg fail chat={cid}: {r}')
+        file_bytes, dl_name = await self._download_tg_file(file_id)
+        disc_refs = await self.send_discord_text_file(
+            f'📄 {caption}',
+            file_bytes=file_bytes,
+            filename=filename or dl_name,
+        ) or []
+        return {'telegram': tg_refs, 'discord': disc_refs}
+
     async def _quick_post(self, chat_id, msg):
         waiting_for_post[chat_id] = False
         sess = sessions.get(str(chat_id)) or {}
@@ -1183,32 +1248,18 @@ class TgMenu:
                     caption = msg.get('caption', 'info_s')
                     kind = 'photo'
                     filename = 'photo.jpg'
-                for cid in self.chat_ids:
-                    if kind == 'photo':
-                        await self.api_post('sendPhoto', data={
-                            'chat_id': cid, 'photo': file_id, 'caption': f'📄 {caption}'[:1024]
-                        })
-                    else:
-                        await self.api_post('sendDocument', data={
-                            'chat_id': cid, 'document': file_id, 'caption': f'📄 {caption}'[:1024]
-                        })
-                file_bytes, dl_name = await self._download_tg_file(file_id)
-                await self.send_discord_text_file(
-                    f'📄 {caption}',
-                    file_bytes=file_bytes,
-                    filename=filename or dl_name,
-                )
+                published = await self._post_quick_media(file_id, kind, caption, filename=filename)
                 await self._delete_msgs(chat_id, extra)
                 self._clear(chat_id)
+                await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
                 return
 
             txt = (msg.get('text') or '').strip()
             if txt:
-                await self.send_discord_text_file(f'info_s\n\n{txt}')
-                for cid in self.chat_ids:
-                    await self.send(cid, f'🎤 info_s\n\n{txt}', track=False)
+                published = await self._post_quick_text(txt)
                 await self._delete_msgs(chat_id, extra)
                 self._clear(chat_id)
+                await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
         except Exception as e:
             print(f'quick post error: {e}')
             await self._delete_msgs(chat_id, extra)
