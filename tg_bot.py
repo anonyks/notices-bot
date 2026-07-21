@@ -380,6 +380,16 @@ class TgMenu:
         sent = 0
         for notice in due:
             label = notice_label(notice)
+            if notice.get('category') == 'assignment':
+                dl = notice.get('deadline_ad')
+                if dl and dn.is_expired(dl):
+                    print(f'[SCHEDULE] skip {label} — deadline passed')
+                    store.update_manual(notice['id'], status='expired')
+                    try:
+                        await self.send_all(f'Scheduled post skipped (deadline passed): {label}')
+                    except Exception as e:
+                        print(f'[SCHEDULE] notify fail: {e}')
+                    continue
             print(f'[SCHEDULE] publishing {label}')
             published = await self.publish_notice(notice)
             if (published or {}).get('telegram') or (published or {}).get('discord'):
@@ -961,11 +971,12 @@ class TgMenu:
                 sess['step'] = 'edit_deadline_cal'
                 await self._ask_calendar(chat_id, prefix='edit')
                 return
+            keep_status = (n or {}).get('status') or 'active'
             store.update_manual(
                 nid,
                 deadline_ad=ad,
                 deadline_bs=sess['draft'].get('deadline_bs'),
-                status='active',
+                status=keep_status,
             )
             await self._after_edit(chat_id, nid, 'Deadline')
             return
