@@ -91,6 +91,15 @@ def parse_publish_at_npt(text):
 
 def require_future_publish_at(dt):
     now = now_npt()
+    if dt.year == now.year + 1:
+        fixed = dt.replace(year=now.year)
+        if fixed > now:
+            raise ValueError(
+                f'Year looks wrong — did you mean {fixed.strftime("%Y-%m-%d %H:%M")} NPT? '
+                f'You entered {dt.strftime("%Y-%m-%d %H:%M")}.'
+            )
+    if dt.year > now.year + 1:
+        raise ValueError('Too far in the future (check the year).')
     if dt <= now:
         raise ValueError(
             f'Must be in the future (now {now.strftime("%Y-%m-%d %H:%M")} NPT).'

@@ -1017,6 +1017,30 @@ class TgMenu:
             await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
             return
 
+        if data == 'edit:sched:retry':
+            sess['step'] = 'edit_schedule_input'
+            n = store.get_manual(sess.get('draft', {}).get('id'))
+            cur = dn.format_publish_at(n['publish_at']) if n and n.get('publish_at') else '?'
+            await self.send(chat_id, f'Current: {cur} NPT\nRe-enter (YYYY-MM-DD HH:MM):')
+            return
+
+        if data == 'edit:sched:confirm':
+            nid = sess['draft'].get('id')
+            publish_at = sess['draft'].get('publish_at')
+            if not nid or not publish_at:
+                await self.send(chat_id, 'Missing data. Start Edit again.')
+                self._clear(chat_id)
+                return
+            try:
+                dn.require_future_publish_at(datetime.fromisoformat(publish_at))
+            except Exception as e:
+                await self.send(chat_id, f'{e}\nTry again.')
+                sess['step'] = 'edit_schedule_input'
+                return
+            store.update_manual(nid, publish_at=publish_at)
+            await self._after_edit(chat_id, nid, 'Post time')
+            return
+
         if data.startswith('edit:republish:'):
             nid = data.split(':')[-1]
             n = store.get_manual(nid)
@@ -1056,6 +1080,8 @@ class TgMenu:
             ]
             if n.get('category') == 'assignment':
                 buttons.append([{'text': 'Deadline', 'callback_data': 'edit:field:deadline'}])
+            if n.get('status') == 'scheduled':
+                buttons.append([{'text': 'Post time', 'callback_data': 'edit:field:schedule'}])
             buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
             await self.send(
                 chat_id,
@@ -1075,10 +1101,23 @@ class TgMenu:
             if field == 'deadline' and n.get('category') != 'assignment':
                 await self.send(chat_id, 'Only assignments have deadlines.')
                 return
+            if field == 'schedule' and n.get('status') != 'scheduled':
+                await self.send(chat_id, 'Only scheduled (not yet posted) notices.')
+                return
             sess['draft']['field'] = field
             if field == 'deadline':
                 sess['step'] = 'edit_deadline_cal'
                 await self._ask_calendar(chat_id, prefix='edit')
+            elif field == 'schedule':
+                sess['step'] = 'edit_schedule_input'
+                cur = dn.format_publish_at(n['publish_at']) if n.get('publish_at') else '?'
+                example = (dn.now_npt() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')
+                await self.send(
+                    chat_id,
+                    f'Current post time: {cur} NPT\n\n'
+                    'New time (YYYY-MM-DD HH:MM, 24h):\n'
+                    f'Example: {example}',
+                )
             else:
                 sess['step'] = f'edit_wait_{field}'
                 await self.send(chat_id, f'Send new {field}:')
@@ -1172,6 +1211,17 @@ class TgMenu:
         sess = sessions.get(str(chat_id)) or {}
         wizard = list(sess.get('wizard_msgs') or [])
         n = store.get_manual(nid)
+        if n and n.get('status') == 'scheduled':
+            when = dn.format_publish_at(n['publish_at']) if n.get('publish_at') else '?'
+            await self._cleanup_wizard(chat_id)
+            self._clear(chat_id)
+            await self.send(
+                chat_id,
+                f'✅ {what} saved for {notice_label(n)}.\nScheduled: {when} NPT',
+                reply_markup=main_reply_keyboard(),
+                track=False,
+            )
+            return
         sessions[str(chat_id)] = {
             'step': 'edit_after_save',
             'draft': {'id': nid},
@@ -1252,13 +1302,11 @@ class TgMenu:
             self._track_wizard(chat_id, msg['message_id'])
 
         if step == 'create_schedule_input' and txt:
-            try:
-                dt = dn.require_future_publish_at(dn.parse_publish_at_npt(txt))
-            except Exception as e:
-                await self.send(chat_id, f'Invalid: {e}\nTry again (YYYY-MM-DD HH:MM):')
-                return
-            sess['draft']['publish_at'] = dt.isoformat()
-            await self._ask_category(chat_id)
+            await self._handle_schedule_input(chat_id, sess, txt, mode='create')
+            return
+
+        if step == 'edit_schedule_input' and txt:
+            await self._handle_schedule_input(chat_id, sess, txt, mode='edit')
             return
 
         if step == 'create_title' and txt:
@@ -1326,6 +1374,29 @@ class TgMenu:
         if step == 'idle' and ('document' in msg or 'photo' in msg):
             await self.send(chat_id, 'Use /post for quick dump, or Create for a full notice.',
                             reply_markup=main_reply_keyboard())
+
+    async def _handle_schedule_input(self, chat_id, sess, txt, mode):
+        try:
+            dt = dn.require_future_publish_at(dn.parse_publish_at_npt(txt))
+        except Exception as e:
+            await self.send(chat_id, f'Invalid: {e}\nTry again (YYYY-MM-DD HH:MM):')
+            return
+        sess['draft']['publish_at'] = dt.isoformat()
+        if mode == 'create':
+            await self._ask_category(chat_id)
+            return
+        sess['step'] = 'edit_schedule_confirm'
+        await self.send(
+            chat_id,
+            f'Confirm new post time?\n\n{dn.format_publish_at(dt)} NPT',
+            reply_markup=inline([
+                [
+                    {'text': '✅ Confirm', 'callback_data': 'edit:sched:confirm'},
+                    {'text': '🔄 Re-enter', 'callback_data': 'edit:sched:retry'},
+                ],
+                [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
+            ]),
+        )
 
     async def _handle_deadline_input(self, chat_id, sess, txt, mode):
         cal = sess['draft'].get('cal', 'ad')
