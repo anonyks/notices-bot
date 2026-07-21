@@ -926,6 +926,9 @@ class TgMenu:
             ad = sess['draft'].get('deadline_ad')
             try:
                 dn.require_future_deadline(date.fromisoformat(ad))
+                pub = sess['draft'].get('publish_at')
+                if pub:
+                    dn.require_schedule_before_deadline(pub, ad)
             except Exception as e:
                 await self.send(chat_id, f'{e}\nPick calendar again:')
                 sess['step'] = 'create_deadline_cal'
@@ -949,6 +952,10 @@ class TgMenu:
                 return
             try:
                 dn.require_future_deadline(date.fromisoformat(ad))
+                n = store.get_manual(nid)
+                pub = (n or {}).get('publish_at') or sess['draft'].get('publish_at')
+                if pub and n and n.get('status') == 'scheduled':
+                    dn.require_schedule_before_deadline(pub, ad)
             except Exception as e:
                 await self.send(chat_id, f'{e}\nPick calendar again:')
                 sess['step'] = 'edit_deadline_cal'
@@ -971,7 +978,7 @@ class TgMenu:
         if data == 'create:publish':
             draft = sess.get('draft') or {}
             preview_mid = cq_mid
-            if not draft.get('title') or not draft.get('body'):
+            if not (draft.get('title') or '').strip() or not (draft.get('body') or '').strip():
                 await self.answer_callback(cq['id'], 'Incomplete notice')
                 await self._reset_chat(chat_id, extra_ids=[preview_mid])
                 return
@@ -979,20 +986,19 @@ class TgMenu:
                 await self.answer_callback(cq['id'], 'Needs a deadline')
                 await self._reset_chat(chat_id, extra_ids=[preview_mid])
                 return
-            if draft.get('category') == 'assignment':
-                try:
+            try:
+                if draft.get('category') == 'assignment':
                     dn.require_future_deadline(date.fromisoformat(draft['deadline_ad']))
-                except Exception as e:
-                    await self.answer_callback(cq['id'], str(e)[:180])
-                    await self._reset_chat(chat_id, extra_ids=[preview_mid])
-                    return
-            if draft.get('publish_at'):
-                try:
+                if draft.get('publish_at'):
                     dn.require_future_publish_at(datetime.fromisoformat(draft['publish_at']))
-                except Exception as e:
-                    await self.answer_callback(cq['id'], str(e)[:180])
-                    await self._reset_chat(chat_id, extra_ids=[preview_mid])
-                    return
+                    if draft.get('category') == 'assignment' and draft.get('deadline_ad'):
+                        dn.require_schedule_before_deadline(
+                            draft['publish_at'], draft['deadline_ad']
+                        )
+            except Exception as e:
+                await self.answer_callback(cq['id'], str(e)[:180])
+                await self._reset_chat(chat_id, extra_ids=[preview_mid])
+                return
             wizard_ids = list(sess.get('wizard_msgs') or [])
             if preview_mid is not None and int(preview_mid) not in wizard_ids:
                 wizard_ids.append(int(preview_mid))
@@ -1033,6 +1039,9 @@ class TgMenu:
                 return
             try:
                 dn.require_future_publish_at(datetime.fromisoformat(publish_at))
+                n = store.get_manual(nid)
+                if n and n.get('category') == 'assignment' and n.get('deadline_ad'):
+                    dn.require_schedule_before_deadline(publish_at, n['deadline_ad'])
             except Exception as e:
                 await self.send(chat_id, f'{e}\nTry again.')
                 sess['step'] = 'edit_schedule_input'
@@ -1406,6 +1415,9 @@ class TgMenu:
             else:
                 ad = dn.ad_from_input(txt)
             dn.require_future_deadline(ad)
+            pub = sess['draft'].get('publish_at')
+            if pub:
+                dn.require_schedule_before_deadline(pub, ad.isoformat())
             bs_str = dn.ad_to_bs_str(ad)
         except Exception as e:
             await self.send(chat_id, f'Invalid date: {e}\nTry again (YYYY-MM-DD):')

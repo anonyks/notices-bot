@@ -19,7 +19,7 @@ def today_npt():
 
 
 def parse_yyyy_mm_dd(text):
-    text = (text or '').strip()
+    text = (text or '').strip().rstrip('.,;')
     try:
         y, m, d = (int(p) for p in text.split('-'))
         return y, m, d
@@ -70,6 +70,15 @@ def format_deadline_short(ad_date_or_str):
 def require_future_deadline(ad_date):
     """Deadline cannot be before today (NPT). Today and tomorrow are OK."""
     today = today_npt()
+    if ad_date.year == today.year + 1:
+        fixed = ad_date.replace(year=today.year)
+        if fixed >= today:
+            raise ValueError(
+                f'Year looks wrong — did you mean {fixed.isoformat()}? '
+                f'You entered {ad_date.isoformat()}.'
+            )
+    if ad_date.year > today.year + 1:
+        raise ValueError('Deadline year looks too far ahead (check the year).')
     if ad_date < today:
         raise ValueError(
             f'Deadline cannot be in the past (today is {today.isoformat()} / {today.strftime("%A")}).'
@@ -77,9 +86,30 @@ def require_future_deadline(ad_date):
     return ad_date
 
 
+def require_schedule_before_deadline(publish_at, deadline_ad):
+    """Scheduled post must not be after end of assignment deadline day."""
+    if not deadline_ad or not publish_at:
+        return
+    dl = date.fromisoformat(deadline_ad) if isinstance(deadline_ad, str) else deadline_ad
+    end = datetime.combine(dl, time(23, 59, 59), tzinfo=NPT)
+    if isinstance(publish_at, str):
+        pub = datetime.fromisoformat(publish_at)
+    else:
+        pub = publish_at
+    if pub.tzinfo is None:
+        pub = pub.replace(tzinfo=NPT)
+    else:
+        pub = pub.astimezone(NPT)
+    if pub > end:
+        raise ValueError(
+            f'Post time ({format_publish_at(pub)}) is after the deadline ({dl.isoformat()}). '
+            'Schedule earlier or change the deadline.'
+        )
+
+
 def parse_publish_at_npt(text):
     """Parse YYYY-MM-DD HH:MM (optional :SS) in Nepal time."""
-    text = (text or '').strip()
+    text = (text or '').strip().rstrip('.,;')
     for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
         try:
             dt = datetime.strptime(text, fmt)
@@ -101,8 +131,15 @@ def require_future_publish_at(dt):
     if dt.year > now.year + 1:
         raise ValueError('Too far in the future (check the year).')
     if dt <= now:
+        entered = dt.strftime('%Y-%m-%d %H:%M')
+        if dt.date() == now.date():
+            raise ValueError(
+                f'That time is already in the past today (now {now.strftime("%H:%M")} NPT). '
+                f'You entered {entered}. Pick a later time — 24h format (20:08 = 8:08 PM).'
+            )
         raise ValueError(
-            f'Must be in the future (now {now.strftime("%Y-%m-%d %H:%M")} NPT).'
+            f'That date/time is in the past (now {now.strftime("%Y-%m-%d %H:%M")} NPT). '
+            f'You entered {entered}.'
         )
     return dt
 
