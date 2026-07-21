@@ -207,6 +207,24 @@ def delivery_summary(published):
     return 'Post failed on both Telegram and Discord.'
 
 
+def publish_complete(published, *, webhooks=()):
+    """True when all configured channels succeeded."""
+    published = published or {}
+    if not published.get('telegram'):
+        return False
+    want_dc = len([w for w in (webhooks or ()) if w])
+    if want_dc == 0:
+        return True
+    return len(published.get('discord') or []) >= want_dc
+
+
+def notice_length_warning(n):
+    n = len(format_notice_text(n))
+    if n > 4096:
+        return f'\n\n⚠️ Notice is {n} chars — Telegram truncates at 4096.'
+    return ''
+
+
 class TgMenu:
     def __init__(
         self,
@@ -380,6 +398,9 @@ class TgMenu:
         sent = 0
         for notice in due:
             label = notice_label(notice)
+            if not notice.get('publish_at'):
+                print(f'[SCHEDULE] skip {label} — missing publish_at')
+                continue
             if notice.get('category') == 'assignment':
                 dl = notice.get('deadline_ad')
                 if dl and dn.is_expired(dl):
@@ -390,9 +411,21 @@ class TgMenu:
                     except Exception as e:
                         print(f'[SCHEDULE] notify fail: {e}')
                     continue
+                pub = notice.get('publish_at')
+                if dl and pub:
+                    try:
+                        dn.require_schedule_before_deadline(pub, dl)
+                    except ValueError as e:
+                        print(f'[SCHEDULE] skip {label} — {e}')
+                        store.update_manual(notice['id'], status='expired')
+                        try:
+                            await self.send_all(f'Scheduled post skipped: {label}\n{e}')
+                        except Exception as ex:
+                            print(f'[SCHEDULE] notify fail: {ex}')
+                        continue
             print(f'[SCHEDULE] publishing {label}')
             published = await self.publish_notice(notice)
-            if (published or {}).get('telegram') or (published or {}).get('discord'):
+            if publish_complete(published, webhooks=self.webhooks):
                 store.update_manual(notice['id'], status='active')
                 sent += 1
                 try:
@@ -400,7 +433,7 @@ class TgMenu:
                 except Exception as e:
                     print(f'[SCHEDULE] notify fail: {e}')
             else:
-                print(f'[SCHEDULE] send failed {label}')
+                print(f'[SCHEDULE] send incomplete {label} — will retry')
         return sent
 
     async def answer_callback(self, callback_id, text=None, alert=False):
@@ -1015,7 +1048,10 @@ class TgMenu:
                 wizard_ids.append(int(preview_mid))
             notice_data = deepcopy(draft)
             is_scheduled = bool(notice_data.get('publish_at'))
-            notice_data['status'] = 'scheduled' if is_scheduled else 'active'
+            if is_scheduled:
+                notice_data['status'] = 'scheduled'
+            else:
+                notice_data.pop('status', None)
             notice = store.add_manual(notice_data)
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
@@ -1031,6 +1067,8 @@ class TgMenu:
                 return
             await self.answer_callback(cq['id'], f"Publishing {notice_label(notice, 40)}")
             published = await self.publish_notice(notice)
+            if publish_complete(published, webhooks=self.webhooks):
+                store.update_manual(notice['id'], status='active')
             await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
             return
 
@@ -1215,7 +1253,7 @@ class TgMenu:
         else:
             head = 'PREVIEW — tap Publish to send\n\n'
             btn = '✅ Publish'
-        text = head + format_notice_text(draft)
+        text = head + format_notice_text(draft) + notice_length_warning(draft)
         await self.send(
             chat_id,
             text,
