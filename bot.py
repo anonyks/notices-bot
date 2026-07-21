@@ -567,20 +567,44 @@ async def poll():
     print('[BOT] Starting Telegram bot...')
     await menu.setup_commands()
 
-    # skip backlog so we don't re-handle old commands on restart
+    # getUpdates needs no webhook; also helps after accidental setWebhook
     try:
-        r = await http.get(f'https://api.telegram.org/bot{tg_token}/getUpdates', timeout=5)
+        r = await http.post(
+            f'https://api.telegram.org/bot{tg_token}/deleteWebhook',
+            params={'drop_pending_updates': 'false'},
+            timeout=10,
+        )
         data = r.json()
         if data.get('ok'):
-            if data.get('result'):
-                offset = data['result'][-1]['update_id'] + 1
-                print(f'[BOT] Cleared {len(data["result"])} old msgs')
-            else:
-                print('[BOT] No old messages')
+            print('[BOT] webhook cleared (polling mode)')
         else:
-            print(f'[BOT] API error: {data.get("description", "unknown")}')
+            print(f'[BOT] deleteWebhook: {data.get("description", "unknown")}')
     except Exception as e:
-        print(f'[BOT] Clear error: {e}')
+        print(f'[BOT] deleteWebhook error: {e}')
+
+    # skip backlog so we don't re-handle old commands on restart
+    # Conflict = another instance still polling (common on Render redeploy) — retry
+    for attempt in range(1, 8):
+        try:
+            r = await http.get(f'https://api.telegram.org/bot{tg_token}/getUpdates', timeout=5)
+            data = r.json()
+            if data.get('ok'):
+                if data.get('result'):
+                    offset = data['result'][-1]['update_id'] + 1
+                    print(f'[BOT] Cleared {len(data["result"])} old msgs')
+                else:
+                    print('[BOT] No old messages')
+                break
+            desc = data.get('description') or 'unknown'
+            if 'Conflict' in desc:
+                print(f'[BOT] getUpdates conflict (other instance) — retry {attempt}/7')
+                await asyncio.sleep(3)
+                continue
+            print(f'[BOT] API error: {desc}')
+            break
+        except Exception as e:
+            print(f'[BOT] Clear error: {e}')
+            await asyncio.sleep(2)
 
     print('[BOT] Ready - listening for commands...')
     while True:
@@ -600,6 +624,14 @@ async def poll():
                     elif 'callback_query' in update:
                         print(f"[BOT] >> cb {update['callback_query'].get('data')}")
                     await menu.handle_update(update)
+            else:
+                desc = data.get('description') or 'unknown'
+                if 'Conflict' in desc:
+                    print('[BOT] Conflict — waiting for other instance to stop')
+                    await asyncio.sleep(5)
+                else:
+                    print(f'[BOT] API error: {desc}')
+                    await asyncio.sleep(2)
         except Exception as e:
             print(f'[BOT] Poll error: {e}')
             await asyncio.sleep(2)
