@@ -68,13 +68,64 @@ def format_deadline_short(ad_date_or_str):
 
 
 def require_future_deadline(ad_date):
-    """Deadline must be after today (NPT). Raises ValueError if not."""
+    """Deadline cannot be before today (NPT). Today and tomorrow are OK."""
     today = today_npt()
-    if ad_date <= today:
+    if ad_date < today:
         raise ValueError(
-            f'Deadline must be after today ({today.isoformat()} / {today.strftime("%A")}).'
+            f'Deadline cannot be in the past (today is {today.isoformat()} / {today.strftime("%A")}).'
         )
     return ad_date
+
+
+def parse_publish_at_npt(text):
+    """Parse YYYY-MM-DD HH:MM (optional :SS) in Nepal time."""
+    text = (text or '').strip()
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=NPT)
+        except ValueError:
+            continue
+    raise ValueError('Use YYYY-MM-DD HH:MM (24h, Nepal time).')
+
+
+def require_future_publish_at(dt):
+    now = now_npt()
+    if dt <= now:
+        raise ValueError(
+            f'Must be in the future (now {now.strftime("%Y-%m-%d %H:%M")} NPT).'
+        )
+    return dt
+
+
+def format_publish_at(value):
+    if isinstance(value, str):
+        dt = datetime.fromisoformat(value)
+    else:
+        dt = value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=NPT)
+    else:
+        dt = dt.astimezone(NPT)
+    return dt.strftime('%Y-%m-%d %H:%M')
+
+
+def scheduled_ready(rows, now=None):
+    """Notices due to publish now (status=scheduled, publish_at <= now)."""
+    now = now or now_npt()
+    out = []
+    for r in rows:
+        if r.get('status') != 'scheduled':
+            continue
+        raw = r.get('publish_at')
+        if not raw:
+            continue
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NPT)
+        if dt <= now:
+            out.append(r)
+    return out
 
 
 def is_expired(ad_deadline_str, now=None):
@@ -91,7 +142,7 @@ def newly_expired_rows(rows):
     for r in rows:
         if r.get('category') != 'assignment':
             continue
-        if r.get('status') == 'expired':
+        if r.get('status') in ('expired', 'scheduled'):
             continue
         dl = r.get('deadline_ad')
         if dl and is_expired(dl):
@@ -112,7 +163,7 @@ def deadlines_tomorrow(rows, now=None):
     for r in rows:
         if r.get('category') != 'assignment':
             continue
-        if r.get('status') == 'expired':
+        if r.get('status') in ('expired', 'scheduled'):
             continue
         if r.get('deadline_ad') == tomorrow:
             out.append(r)

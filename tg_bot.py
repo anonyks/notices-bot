@@ -1,7 +1,7 @@
 # Telegram menu / wizard for manual notices
 import json
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import store
 import dates_npt as dn
@@ -371,6 +371,28 @@ class TgMenu:
         await self.delete_published_notice(fake)
         store.clear_reminder_posts()
 
+    async def publish_due_scheduled(self):
+        """Publish notices whose scheduled time has arrived."""
+        rows = store.load_manual()
+        due = dn.scheduled_ready(rows)
+        if not due:
+            return 0
+        sent = 0
+        for notice in due:
+            label = notice_label(notice)
+            print(f'[SCHEDULE] publishing {label}')
+            published = await self.publish_notice(notice)
+            if (published or {}).get('telegram') or (published or {}).get('discord'):
+                store.update_manual(notice['id'], status='active')
+                sent += 1
+                try:
+                    await self.send_all(f'Scheduled post sent: {label}')
+                except Exception as e:
+                    print(f'[SCHEDULE] notify fail: {e}')
+            else:
+                print(f'[SCHEDULE] send failed {label}')
+        return sent
+
     async def answer_callback(self, callback_id, text=None, alert=False):
         data = {'callback_query_id': callback_id}
         if text:
@@ -602,7 +624,8 @@ class TgMenu:
             await self._delete_msgs(chat_id, [trigger_mid])
         await self.apply_expirations()
         rows = store.load_manual()
-        active = [r for r in rows if r.get('status') != 'expired']
+        active = [r for r in rows if r.get('status') not in ('expired', 'scheduled')]
+        scheduled = [r for r in rows if r.get('status') == 'scheduled']
         assigns = [r for r in active if r.get('category') == 'assignment']
         upcoming = dn.deadlines_tomorrow(rows)
         now = dn.now_npt()
@@ -611,6 +634,7 @@ class TgMenu:
             '📊 Status\n'
             f'Time now: {now.strftime("%Y-%m-%d %H:%M")}\n'
             f'Active notices: {len(active)}\n'
+            f'Scheduled: {len(scheduled)}\n'
             f'Active assignments: {len(assigns)}\n'
             f'Due tomorrow: {len(upcoming)}\n'
             f'{format_next_reminder_line(now)}\n'
@@ -643,10 +667,12 @@ class TgMenu:
         await self._reset_chat(chat_id)
         await self.apply_expirations()
         rows = store.load_manual()
-        active = [r for r in rows if r.get('status') != 'expired']
+        active = [r for r in rows if r.get('status') not in ('expired', 'scheduled')]
+        scheduled = [r for r in rows if r.get('status') == 'scheduled']
         expired = [r for r in rows if r.get('status') == 'expired']
         active = sorted(active, key=lambda r: r.get('created_at', ''), reverse=True)[:15]
-        if not active:
+        scheduled = sorted(scheduled, key=lambda r: r.get('publish_at') or r.get('created_at', ''))[:10]
+        if not active and not scheduled:
             await self.send(
                 chat_id,
                 f'No active notices.\n(expired on file: {len(expired)})',
@@ -657,12 +683,22 @@ class TgMenu:
                 track=False,
             )
             return
-        lines = ['📋 Active notices', '━━━━━━━━━━━━━━━━', '']
-        for r in active:
-            extra = ''
-            if r.get('deadline_ad'):
-                extra = f" | {dn.format_deadline_short(r['deadline_ad'])}"
-            lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
+        lines = ['📋 Notices', '━━━━━━━━━━━━━━━━', '']
+        if scheduled:
+            lines += ['⏱ Scheduled:']
+            for r in scheduled:
+                when = dn.format_publish_at(r['publish_at']) if r.get('publish_at') else '?'
+                lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 40)} | {when}")
+            lines.append('')
+        if active:
+            lines += ['📌 Live:']
+            for r in active:
+                extra = ''
+                if r.get('deadline_ad'):
+                    extra = f" | {dn.format_deadline_short(r['deadline_ad'])}"
+                lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
+        else:
+            lines += ['(no live posts yet)']
         upcoming = dn.deadlines_tomorrow(rows)
         if upcoming:
             lines += ['', '⏳ Due tomorrow:']
@@ -704,19 +740,33 @@ class TgMenu:
             [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
         ]), track=False)
 
+    async def _ask_category(self, chat_id):
+        sess = self._sess(chat_id)
+        sess['step'] = 'create_category'
+        await self.send(
+            chat_id,
+            'Pick category:',
+            reply_markup=inline([
+                [{'text': '📢 General', 'callback_data': 'create:cat:general'}],
+                [{'text': '📝 Assignment', 'callback_data': 'create:cat:assignment'}],
+                [{'text': '🚨 Urgent', 'callback_data': 'create:cat:urgent'}],
+                [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
+            ]),
+            track=True,
+        )
+
     async def start_create(self, chat_id, trigger_mid=None):
         waiting_for_post[str(chat_id)] = False
         await self._cleanup_wizard(chat_id)
         if trigger_mid is not None:
             await self._delete_msgs(chat_id, [trigger_mid])
-        sessions[str(chat_id)] = {'step': 'create_category', 'draft': {}, 'wizard_msgs': []}
+        sessions[str(chat_id)] = {'step': 'create_timing', 'draft': {}, 'wizard_msgs': []}
         await self.send(
             chat_id,
-            'Create notice — pick category:',
+            'Create notice — when to post?',
             reply_markup=inline([
-                [{'text': '📢 General', 'callback_data': 'create:cat:general'}],
-                [{'text': '📝 Assignment', 'callback_data': 'create:cat:assignment'}],
-                [{'text': '🚨 Urgent', 'callback_data': 'create:cat:urgent'}],
+                [{'text': '📤 Post now', 'callback_data': 'create:timing:now'}],
+                [{'text': '🕐 Post later', 'callback_data': 'create:timing:later'}],
                 [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
             ]),
             track=True,
@@ -821,9 +871,28 @@ class TgMenu:
             await self.show_expired(chat_id)
             return
 
+        if data.startswith('create:timing:'):
+            mode = data.split(':')[-1]
+            if mode == 'now':
+                sess['draft'].pop('publish_at', None)
+                await self._ask_category(chat_id)
+            else:
+                sess['step'] = 'create_schedule_input'
+                example = (dn.now_npt() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')
+                await self.send(
+                    chat_id,
+                    'When should this post go live?\n'
+                    'Type date & time in Nepal time:\n'
+                    'YYYY-MM-DD HH:MM (24h)\n'
+                    f'Example: {example}',
+                    track=True,
+                )
+            return
+
         if data.startswith('create:cat:'):
             cat = data.split(':')[-1]
-            sess['draft'] = {'category': cat, 'status': 'active'}
+            sess.setdefault('draft', {})
+            sess['draft']['category'] = cat
             sess['step'] = 'create_title'
             await self.send(chat_id, f'{cat_emoji(cat)} Category: {cat}\n\nSend the title:')
             return
@@ -848,7 +917,7 @@ class TgMenu:
             await self.send(
                 chat_id,
                 f"Type deadline as YYYY-MM-DD ({sess['draft']['cal'].upper()}).\n"
-                f"Must be after today ({dn.today_npt().isoformat()}).\n"
+                f"Cannot be in the past (today: {dn.today_npt().isoformat()}).\n"
                 f"Example: {tomorrow.isoformat()}",
             )
             return
@@ -917,13 +986,33 @@ class TgMenu:
                     await self.answer_callback(cq['id'], str(e)[:180])
                     await self._reset_chat(chat_id, extra_ids=[preview_mid])
                     return
+            if draft.get('publish_at'):
+                try:
+                    dn.require_future_publish_at(datetime.fromisoformat(draft['publish_at']))
+                except Exception as e:
+                    await self.answer_callback(cq['id'], str(e)[:180])
+                    await self._reset_chat(chat_id, extra_ids=[preview_mid])
+                    return
             wizard_ids = list(sess.get('wizard_msgs') or [])
             if preview_mid is not None and int(preview_mid) not in wizard_ids:
                 wizard_ids.append(int(preview_mid))
-            notice = store.add_manual(deepcopy(draft))
-            await self.answer_callback(cq['id'], f"Publishing {notice_label(notice, 40)}")
+            notice_data = deepcopy(draft)
+            is_scheduled = bool(notice_data.get('publish_at'))
+            notice_data['status'] = 'scheduled' if is_scheduled else 'active'
+            notice = store.add_manual(notice_data)
             await self._delete_msgs(chat_id, wizard_ids)
             self._clear(chat_id)
+            if is_scheduled:
+                when = dn.format_publish_at(notice['publish_at'])
+                await self.answer_callback(cq['id'], f'Scheduled {notice_label(notice, 40)}')
+                await self.send(
+                    chat_id,
+                    f'Scheduled for {when} NPT.\n{notice_label(notice)}',
+                    reply_markup=main_reply_keyboard(),
+                    track=False,
+                )
+                return
+            await self.answer_callback(cq['id'], f"Publishing {notice_label(notice, 40)}")
             published = await self.publish_notice(notice)
             await self.send(chat_id, delivery_summary(published), reply_markup=main_reply_keyboard(), track=False)
             return
@@ -1061,13 +1150,19 @@ class TgMenu:
 
     async def _show_preview(self, chat_id, sess):
         draft = sess['draft']
-        text = 'PREVIEW — tap Publish to send\n\n' + format_notice_text(draft)
+        if draft.get('publish_at'):
+            head = f"PREVIEW — scheduled {dn.format_publish_at(draft['publish_at'])} NPT\n\n"
+            btn = '✅ Schedule'
+        else:
+            head = 'PREVIEW — tap Publish to send\n\n'
+            btn = '✅ Publish'
+        text = head + format_notice_text(draft)
         await self.send(
             chat_id,
             text,
             reply_markup=inline([
                 [
-                    {'text': '✅ Publish', 'callback_data': 'create:publish'},
+                    {'text': btn, 'callback_data': 'create:publish'},
                     {'text': '❌ Cancel', 'callback_data': 'menu:cancel'},
                 ]
             ]),
@@ -1155,6 +1250,16 @@ class TgMenu:
         # during Create/Edit/Delete wizard, track user replies so we can delete them at the end
         if self._in_wizard(chat_id) and msg.get('message_id') is not None:
             self._track_wizard(chat_id, msg['message_id'])
+
+        if step == 'create_schedule_input' and txt:
+            try:
+                dt = dn.require_future_publish_at(dn.parse_publish_at_npt(txt))
+            except Exception as e:
+                await self.send(chat_id, f'Invalid: {e}\nTry again (YYYY-MM-DD HH:MM):')
+                return
+            sess['draft']['publish_at'] = dt.isoformat()
+            await self._ask_category(chat_id)
+            return
 
         if step == 'create_title' and txt:
             sess['draft']['title'] = txt

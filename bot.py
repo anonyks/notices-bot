@@ -605,6 +605,20 @@ async def poll():
             await asyncio.sleep(2)
 
 
+async def scheduled_loop():
+    """Publish notices when their scheduled NPT time arrives."""
+    print('[SCHEDULE] Loop started (checks every 30s)')
+    while True:
+        try:
+            if menu:
+                n = await menu.publish_due_scheduled()
+                if n:
+                    print(f'[SCHEDULE] published {n} notice(s)')
+        except Exception as e:
+            print(f'[SCHEDULE] error: {e}')
+        await asyncio.sleep(30)
+
+
 async def reminder_loop():
     """At 6:00 PM Nepal time, remind about assignments due tomorrow. No catch-up if missed."""
     print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
@@ -761,7 +775,7 @@ async def main():
             edit_discord_message=edit_discord_message,
             delete_discord_message=delete_discord_message,
         )
-        await asyncio.gather(run(), poll(), reminder_loop(), keepalive_loop())
+        await asyncio.gather(run(), poll(), reminder_loop(), scheduled_loop(), keepalive_loop())
 
 
 # health server in background, then run monitor + telegram
