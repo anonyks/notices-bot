@@ -50,7 +50,21 @@ Message the bot `/start` — you should get the menu keyboard.
 
 Check logs for `[STORE] Gist backup enabled` (or the WARNING if gist env is missing).
 
+## 5. keep awake (Render free)
+
+The bot self-pings its public URL every ~4 min. That alone is flaky — **also add UptimeRobot**:
+
+1. [uptimerobot.com](https://uptimerobot.com) → Add New Monitor
+2. Monitor Type: **HTTP(s)**
+3. URL: `https://notices-bot.onrender.com/` (or your Render URL)
+4. Interval: **5 minutes**
+5. Alert contacts: optional
+
+External pings from UptimeRobot count as real traffic even if the process is half-dead. Self-ping + UptimeRobot together is fine (no conflict).
+
+Optional env: `HEALTH_PING_URL`, `KEEPALIVE_EVERY` (seconds, default 240).
+
 ## logs / restart
 
-- Logs tab on Render
+- Logs tab on Render — look for `[HEALTH] ping 200`
 - Manual Deploy → clear build cache & deploy if needed

@@ -53,13 +53,14 @@ w2 = (os.getenv('DISCORD_WEBHOOK2') or '').strip()
 tg_token = (os.getenv('TELEGRAM_TOKEN') or '').strip()
 tg_chat_ids = parse_chat_ids(os.getenv('TELEGRAM_CHAT_ID') or '')
 # self-ping so Render free tier doesnt sleep (must hit public URL, not localhost)
+# also add the same URL in UptimeRobot (external ping) — more reliable than self-ping alone
 health_ping_url = (
     (os.getenv('HEALTH_PING_URL') or '').strip()
     or (os.getenv('RENDER_EXTERNAL_URL') or '').strip()
     or 'https://notices-bot.onrender.com'
 )
-# Render free spins down ~15 min without inbound HTTP — ping sooner than that
-KEEPALIVE_EVERY = int(os.getenv('KEEPALIVE_EVERY', '300'))  # 5 min
+# Render free spins down ~15 min without inbound HTTP — stay under that
+KEEPALIVE_EVERY = int(os.getenv('KEEPALIVE_EVERY', '240'))  # 4 min
 
 if not tg_token or not tg_chat_ids:
     print('ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set!')
@@ -784,14 +785,29 @@ async def keepalive_loop():
         return
     print(f'[HEALTH] keepalive every {KEEPALIVE_EVERY}s → {url}')
     # first ping soon after boot (don't wait a full interval)
-    await asyncio.sleep(15)
+    await asyncio.sleep(10)
     while True:
         try:
-            r = await http.get(url, timeout=10)
+            r = await http.get(url, timeout=15)
             print(f'[HEALTH] ping {r.status_code}')
+            wait = KEEPALIVE_EVERY
         except Exception as e:
             print(f'[HEALTH] ping failed: {e}')
-        await asyncio.sleep(KEEPALIVE_EVERY)
+            wait = 60  # retry sooner if wake ping failed
+        await asyncio.sleep(wait)
+
+
+async def _supervised(name, coro_fn):
+    """Restart a background loop if it crashes — don't take down keepalive/poll together."""
+    while True:
+        try:
+            await coro_fn()
+            print(f'[{name}] exited cleanly — restarting in 5s')
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f'[{name}] crashed: {e} — restarting in 5s')
+        await asyncio.sleep(5)
 
 
 async def main():
@@ -807,7 +823,13 @@ async def main():
             edit_discord_message=edit_discord_message,
             delete_discord_message=delete_discord_message,
         )
-        await asyncio.gather(run(), poll(), reminder_loop(), scheduled_loop(), keepalive_loop())
+        await asyncio.gather(
+            _supervised('MONITOR', run),
+            _supervised('BOT', poll),
+            _supervised('REMINDER', reminder_loop),
+            _supervised('SCHEDULE', scheduled_loop),
+            _supervised('HEALTH', keepalive_loop),
+        )
 
 
 # health server in background, then run monitor + telegram
