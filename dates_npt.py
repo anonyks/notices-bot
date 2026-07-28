@@ -216,6 +216,27 @@ def deadlines_tomorrow(rows, now=None):
     return out
 
 
+def deadlines_today(rows, now=None):
+    """Assignments whose deadline date is today (NPT)."""
+    now = now or now_npt()
+    today = now.date().isoformat()
+    out = []
+    for r in rows:
+        if r.get('category') != 'assignment':
+            continue
+        if r.get('status') in ('expired', 'scheduled'):
+            continue
+        if r.get('deadline_ad') == today:
+            out.append(r)
+    return out
+
+
+def deadlines_for_reminder(rows, now=None):
+    """6pm reminder: due today + due tomorrow (NPT), today first."""
+    now = now or now_npt()
+    return deadlines_today(rows, now=now) + deadlines_tomorrow(rows, now=now)
+
+
 def seconds_until_next_6pm_npt(now=None):
     now = now or now_npt()
     target = datetime.combine(now.date(), time(18, 0, 0), tzinfo=NPT)

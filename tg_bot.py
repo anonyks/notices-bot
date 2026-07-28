@@ -160,17 +160,28 @@ def tg_media_parts(notice):
 
 def format_reminder_bundle(items):
     # Avoid "1." markdown lists — Discord glues the next line onto the title.
+    today = dn.today_npt().isoformat()
+    due_today = [n for n in items if n.get('deadline_ad') == today]
+    due_tmr = [n for n in items if n.get('deadline_ad') != today]
+
     lines = [
         '⏰ REMINDER',
         '━━━━━━━━━━━━━━━━',
-        'Due TOMORROW',
-        '',
     ]
-    for i, n in enumerate(items, 1):
-        title = n.get('title', 'Untitled')
-        lines.append(f'{i}) {title}')
-        lines.append(dn.format_deadline_pair(date.fromisoformat(n['deadline_ad'])))
+
+    def add_section(label, group):
+        if not group:
+            return
+        lines.append(label)
         lines.append('')
+        for i, n in enumerate(group, 1):
+            title = n.get('title', 'Untitled')
+            lines.append(f'{i}) {title}')
+            lines.append(dn.format_deadline_pair(date.fromisoformat(n['deadline_ad'])))
+            lines.append('')
+
+    add_section('Due TODAY', due_today)
+    add_section('Due TOMORROW', due_tmr)
     lines.append('━━━━━━━━━━━━━━━━')
     lines.append('Finish it before midnight.')
     return with_top_gap('\n'.join(lines))
@@ -670,7 +681,8 @@ class TgMenu:
         active = [r for r in rows if r.get('status') not in ('expired', 'scheduled')]
         scheduled = [r for r in rows if r.get('status') == 'scheduled']
         assigns = [r for r in active if r.get('category') == 'assignment']
-        upcoming = dn.deadlines_tomorrow(rows)
+        upcoming_today = dn.deadlines_today(rows)
+        upcoming_tmr = dn.deadlines_tomorrow(rows)
         now = dn.now_npt()
         await self.send(
             chat_id,
@@ -679,7 +691,8 @@ class TgMenu:
             f'Active notices: {len(active)}\n'
             f'Scheduled: {len(scheduled)}\n'
             f'Active assignments: {len(assigns)}\n'
-            f'Due tomorrow: {len(upcoming)}\n'
+            f'Due today: {len(upcoming_today)}\n'
+            f'Due tomorrow: {len(upcoming_tmr)}\n'
             f'{format_next_reminder_line(now)}\n'
             f'(no catch-up if 6pm is missed)\n'
             f'Allowed chats: {len(self.chat_ids)}\n'
@@ -742,10 +755,15 @@ class TgMenu:
                 lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         else:
             lines += ['(no live posts yet)']
-        upcoming = dn.deadlines_tomorrow(rows)
-        if upcoming:
+        upcoming_today = dn.deadlines_today(rows)
+        upcoming_tmr = dn.deadlines_tomorrow(rows)
+        if upcoming_today:
+            lines += ['', '⏳ Due today:']
+            for r in upcoming_today:
+                lines.append(f"• {notice_label(r, 50)}")
+        if upcoming_tmr:
             lines += ['', '⏳ Due tomorrow:']
-            for r in upcoming:
+            for r in upcoming_tmr:
                 lines.append(f"• {notice_label(r, 50)}")
         if expired:
             lines += ['', f'(expired archived: {len(expired)} — tap Expired to view)']

@@ -653,13 +653,13 @@ async def scheduled_loop():
 
 
 async def reminder_loop():
-    """At 6:00 PM Nepal time, remind about assignments due tomorrow. No catch-up if missed."""
+    """At 6:00 PM Nepal time, remind about assignments due today + tomorrow. No catch-up if missed."""
     print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
     while True:
         try:
             now = dn.now_npt()
-            # already inside today's 6pm hour and not sent yet (redeploy / early-wake recovery)
-            in_window = (now.hour == 18 and not reminder_already_sent_today())
+            # already inside today's 6pm hour (redeploy / early-wake recovery)
+            in_window = now.hour == 18
             if not in_window:
                 wait_s = dn.seconds_until_next_6pm_npt()
                 print(f'[REMINDER] sleeping {wait_s}s until next 6pm NPT')
@@ -680,18 +680,27 @@ async def reminder_loop():
                     await asyncio.sleep(70)
                     continue
 
-            if reminder_already_sent_today():
+            rows = store.load_manual()
+            due = dn.deadlines_for_reminder(rows, now=now)
+            rem = store.load_reminder_posts()
+            # recovery: marked "sent" with no posts (old tomorrow-only empty mark) but dues exist
+            empty_mark = reminder_already_sent_today() and not (
+                rem.get('telegram') or rem.get('discord') or rem.get('notice_ids')
+            )
+            if reminder_already_sent_today() and not (empty_mark and due):
                 print('[REMINDER] already sent today — skip')
                 await asyncio.sleep(70)
                 continue
+            if empty_mark and due:
+                print('[REMINDER] empty day-mark but dues exist — resending')
 
             if menu:
                 await menu.apply_expirations()
             rows = store.load_manual()
-            due = dn.deadlines_tomorrow(rows, now=now)
+            due = dn.deadlines_for_reminder(rows, now=now)
             if not due:
                 mark_reminder_sent_today()  # empty day — don't re-check all night
-                print('[REMINDER] nothing due tomorrow')
+                print('[REMINDER] nothing due today/tomorrow')
             else:
                 text = format_reminder_bundle(due)
                 titles = ', '.join((n.get('title') or 'Untitled') for n in due[:5])
@@ -712,16 +721,16 @@ async def reminder_loop():
                     print(f'[REMINDER] sent {len(due)} item(s)')
                     await notify_ops(
                         f'Reminder sent for {len(due)} item(s).\n{titles}\n'
-                        f'Telegram: {"ok" if tg_ok else "fail"} | Discord: {"ok" if disc_ok else "fail"}'
+                        f'TG={"ok" if tg_ok else "fail"} Discord={"ok" if disc_ok else "fail"}'
                     )
                 else:
-                    print('[REMINDER] send failed (tg_ok=False disc_ok=False) — not marking sent')
-                    await notify_ops(f'Reminder failed.\n{titles}')
-
-            await asyncio.sleep(70)
+                    print('[REMINDER] send failed — will retry')
+                    await notify_ops(f'Reminder FAILED for: {titles}')
+                    await asyncio.sleep(70)
+                    continue
         except Exception as e:
             print(f'[REMINDER] error: {e}')
-            await asyncio.sleep(60)
+        await asyncio.sleep(70)
 
 
 async def run():
