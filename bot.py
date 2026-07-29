@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 import store
 import dates_npt as dn
+from media_compress import fit_discord_attachment, DISCORD_SOFT_MAX
 from tg_bot import (
     TgMenu,
     parse_chat_ids,
@@ -422,23 +423,45 @@ async def send_discord(title, url, medias):
             if files:
                 for item in files[:10]:
                     try:
-                        pr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=30)
-                        if pr.status_code == 200:
-                            fn = item['url'].split('/')[-1].split('?')[0] or (
-                                'image.png' if item['kind'] == 'image' else 'file.pdf'
-                            )
-                            r = await _discord_post(
-                                w,
-                                data={'content': msg[:1900]},
-                                files={'file': (fn, pr.content)},
-                                timeout=30,
-                            )
-                            if r.status_code in (200, 201, 204):
-                                print(f'discord: {fn}')
+                        pr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=60)
+                        if pr.status_code != 200:
+                            continue
+                        fn = item['url'].split('/')[-1].split('?')[0] or (
+                            'image.png' if item['kind'] == 'image' else 'file.pdf'
+                        )
+                        body, fn, _ = fit_discord_attachment(pr.content, fn)
+                        if len(body) > DISCORD_SOFT_MAX + 512 * 1024:
+                            # still hopeless (>~9.5MB) — text + link only for this file
+                            print(f'discord: skip fat file {fn} ({len(body)/1024/1024:.1f}MB), link-only')
+                            if msg:
+                                r = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
+                                if r.status_code in (200, 201, 204):
+                                    print('discord: sent (link only)')
+                                    posted_any = True
+                                    msg = ''
+                            continue
+                        r = await _discord_post(
+                            w,
+                            data={'content': msg[:1900]},
+                            files={'file': (fn, body)},
+                            timeout=60,
+                        )
+                        if r.status_code in (200, 201, 204):
+                            print(f'discord: {fn}')
+                            posted_any = True
+                            msg = ''
+                        elif r.status_code == 413:
+                            # last resort: drop attachment, keep notice text+link
+                            print(f'discord 413 on {fn} — posting link only')
+                            r2 = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
+                            if r2.status_code in (200, 201, 204):
+                                print('discord: sent (link only after 413)')
                                 posted_any = True
                                 msg = ''
                             else:
-                                print(f'discord HTTP {r.status_code}: {r.text[:200]}')
+                                print(f'discord HTTP {r2.status_code}: {r2.text[:200]}')
+                        else:
+                            print(f'discord HTTP {r.status_code}: {r.text[:200]}')
                     except Exception as e:
                         print(f'discord file error: {e}')
             else:
@@ -464,12 +487,20 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None):
             url = w if 'wait=' in w else (w + ('&' if '?' in w else '?') + 'wait=true')
             body = discord_escape(caption or '')
             if file_bytes and filename:
-                r = await _discord_post(
-                    url,
-                    data={'content': body[:1900]},
-                    files={'file': (filename, file_bytes)},
-                    timeout=30,
-                )
+                payload, filename, _ = fit_discord_attachment(file_bytes, filename)
+                if len(payload) > DISCORD_SOFT_MAX + 512 * 1024:
+                    print(f'discord: skip fat file {filename}, caption only')
+                    r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
+                else:
+                    r = await _discord_post(
+                        url,
+                        data={'content': body[:1900]},
+                        files={'file': (filename, payload)},
+                        timeout=60,
+                    )
+                    if r.status_code == 413:
+                        print(f'discord 413 on {filename} — caption only')
+                        r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
             else:
                 r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
             if r.status_code in (200, 201):
