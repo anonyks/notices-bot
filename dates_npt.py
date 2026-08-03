@@ -231,10 +231,26 @@ def deadlines_today(rows, now=None):
     return out
 
 
+def already_reminded_for_deadline(r):
+    """True if we already sent a 6pm reminder for this notice's current deadline."""
+    dl = r.get('deadline_ad')
+    return bool(dl) and r.get('reminded_for_deadline') == dl
+
+
 def deadlines_for_reminder(rows, now=None):
-    """6pm reminder: due today + due tomorrow (NPT), today first."""
+    """
+    6pm reminder once per notice/deadline:
+    - due tomorrow (normal heads-up)
+    - due today only if never reminded for this deadline (e.g. posted same day)
+    Skip items already reminded yesterday as "tomorrow".
+    """
     now = now or now_npt()
-    return deadlines_today(rows, now=now) + deadlines_tomorrow(rows, now=now)
+    out = []
+    for r in deadlines_today(rows, now=now) + deadlines_tomorrow(rows, now=now):
+        if already_reminded_for_deadline(r):
+            continue
+        out.append(r)
+    return out
 
 
 def seconds_until_next_6pm_npt(now=None):

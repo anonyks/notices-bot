@@ -1028,6 +1028,7 @@ class TgMenu:
                 deadline_ad=ad,
                 deadline_bs=sess['draft'].get('deadline_bs'),
                 status=keep_status,
+                reminded_for_deadline=None,  # new deadline → allow one fresh reminder
             )
             await self._after_edit(chat_id, nid, 'Deadline')
             return

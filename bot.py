@@ -749,6 +749,12 @@ async def reminder_loop():
                         'telegram': tg_refs,
                         'discord': disc_refs or [],
                     })
+                    # one reminder per notice/deadline — skip "due today" if already reminded as tomorrow
+                    for n in due:
+                        nid = n.get('id')
+                        dl = n.get('deadline_ad')
+                        if nid and dl:
+                            store.update_manual(nid, reminded_for_deadline=dl)
                     print(f'[REMINDER] sent {len(due)} item(s)')
                     await notify_ops(
                         f'Reminder sent for {len(due)} item(s).\n{titles}\n'
