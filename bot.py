@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import random
 from datetime import datetime, timezone
@@ -479,8 +480,16 @@ async def send_discord(title, url, medias):
     return posted_any
 
 
-async def send_discord_text_file(caption, file_bytes=None, filename=None):
-    """Post to Discord webhooks. Returns [{webhook_url, message_id}, ...] when possible."""
+async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_to_refs=None):
+    """Post to Discord webhooks. Returns [{webhook_url, message_id, ...}, ...] when possible.
+    reply_to_refs: optional published discord refs — reply under matching webhook's message.
+    """
+    reply_by_hook = {}
+    for ref in reply_to_refs or []:
+        base = (ref.get('webhook_url') or '').split('?')[0]
+        if base and ref.get('message_id'):
+            reply_by_hook[base] = ref
+
     refs = []
     for w in [w1, w2]:
         if not w:
@@ -488,34 +497,86 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None):
         try:
             # wait=true so Discord returns the message id (needed for edit/delete)
             url = w if 'wait=' in w else (w + ('&' if '?' in w else '?') + 'wait=true')
+            base = w.split('?')[0]
             body = discord_escape(caption or '')
+            reply = reply_by_hook.get(base)
+            reply_mid = str(reply.get('message_id')) if reply else None
+
+            # Discord webhooks: try message_reference (same-channel reply). If rejected, bare post.
+            payload_extra = {}
+            if reply_mid:
+                payload_extra['message_reference'] = {
+                    'message_id': reply_mid,
+                    'fail_if_not_exists': False,
+                }
+
+            async def _post_json(content, extra=None):
+                data = {'content': content[:1900]}
+                if extra:
+                    data.update(extra)
+                return await _discord_post(url, json=data, timeout=10)
+
             if file_bytes and filename:
-                payload, filename, _ = fit_discord_attachment(file_bytes, filename)
-                if len(payload) > DISCORD_SOFT_MAX + 512 * 1024:
+                file_payload, filename, _ = fit_discord_attachment(file_bytes, filename)
+                if len(file_payload) > DISCORD_SOFT_MAX + 512 * 1024:
                     print(f'discord: skip fat file {filename}, caption only')
-                    r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
+                    r = await _post_json(body, payload_extra or None)
+                    if r.status_code not in (200, 201) and payload_extra:
+                        print(f'discord reply-to rejected ({r.status_code}) — bare send')
+                        r = await _post_json(body)
                 else:
+                    # multipart can't easily carry message_reference — caption first as reply, then file? 
+                    # Prefer single post: try JSON reply without file fields via form... use JSON-only reply path for reminder (no file).
+                    # Manual notices with files rarely need reminder reply; reminder path is text-only.
+                    form = {'content': body[:1900]}
+                    if reply_mid:
+                        # Discord accepts message_reference as form field JSON string for multipart
+                        form['message_reference'] = json.dumps({
+                            'message_id': reply_mid,
+                            'fail_if_not_exists': False,
+                        })
                     r = await _discord_post(
                         url,
-                        data={'content': body[:1900]},
-                        files={'file': (filename, payload)},
+                        data=form,
+                        files={'file': (filename, file_payload)},
                         timeout=60,
                     )
                     if r.status_code == 413:
                         print(f'discord 413 on {filename} — caption only')
-                        r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
+                        r = await _post_json(body, payload_extra or None)
+                        if r.status_code not in (200, 201) and payload_extra:
+                            r = await _post_json(body)
+                    elif r.status_code not in (200, 201) and payload_extra:
+                        print(f'discord reply-to rejected ({r.status_code}) — bare send with file')
+                        r = await _discord_post(
+                            url,
+                            data={'content': body[:1900]},
+                            files={'file': (filename, file_payload)},
+                            timeout=60,
+                        )
             else:
-                r = await _discord_post(url, json={'content': body[:1900]}, timeout=10)
+                r = await _post_json(body, payload_extra or None)
+                if r.status_code not in (200, 201) and payload_extra:
+                    print(f'discord reply-to rejected ({r.status_code}) — bare send')
+                    r = await _post_json(body)
+
             if r.status_code in (200, 201):
                 try:
-                    mid = r.json().get('id')
+                    j = r.json()
+                    mid = j.get('id')
                     if mid:
-                        # store base webhook url without wait query
-                        base = w.split('?')[0]
-                        refs.append({'webhook_url': base, 'message_id': str(mid)})
+                        ref = {
+                            'webhook_url': base,
+                            'message_id': str(mid),
+                        }
+                        if j.get('channel_id'):
+                            ref['channel_id'] = str(j['channel_id'])
+                        if j.get('guild_id'):
+                            ref['guild_id'] = str(j['guild_id'])
+                        refs.append(ref)
                 except Exception:
                     pass
-                print('discord: manual/quick sent')
+                print('discord: manual/quick sent' + (' (reply)' if reply_mid else ''))
             else:
                 print(f'discord manual HTTP {r.status_code}: {r.text[:200]}')
         except Exception as e:
@@ -747,7 +808,10 @@ async def reminder_loop():
                     print(f'[REMINDER] reply-to {notice_label(anchor)} in {len(reply_map)} chat(s)')
                 tg_refs = await menu.send_all_tracked(text, reply_to_by_chat=reply_map)
                 tg_ok = bool(tg_refs)
-                disc_refs = await send_discord_text_file(text)
+                disc_reply = (anchor.get('published') or {}).get('discord') if anchor else None
+                if disc_reply:
+                    print(f'[REMINDER] discord reply-to {notice_label(anchor)}')
+                disc_refs = await send_discord_text_file(text, reply_to_refs=disc_reply)
                 disc_ok = bool(disc_refs)
                 if tg_ok or disc_ok:
                     mark_reminder_sent_today()  # only after a successful send attempt
