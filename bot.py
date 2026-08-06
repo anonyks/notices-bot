@@ -18,6 +18,9 @@ from tg_bot import (
     parse_chat_ids,
     format_from_site,
     format_reminder_bundle,
+    most_recent_due_notice,
+    reply_to_by_chat_from_notice,
+    notice_label,
     reminder_already_sent_today,
     mark_reminder_sent_today,
 )
@@ -737,7 +740,12 @@ async def reminder_loop():
                 titles = ', '.join((n.get('title') or 'Untitled') for n in due[:5])
                 if len(due) > 5:
                     titles += f' (+{len(due) - 5} more)'
-                tg_refs = await menu.send_all_tracked(text)
+                # Telegram: reply under the most recently published due notice
+                anchor = most_recent_due_notice(due)
+                reply_map = reply_to_by_chat_from_notice(anchor)
+                if anchor and reply_map:
+                    print(f'[REMINDER] reply-to {notice_label(anchor)} in {len(reply_map)} chat(s)')
+                tg_refs = await menu.send_all_tracked(text, reply_to_by_chat=reply_map)
                 tg_ok = bool(tg_refs)
                 disc_refs = await send_discord_text_file(text)
                 disc_ok = bool(disc_refs)

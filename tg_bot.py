@@ -187,6 +187,35 @@ def format_reminder_bundle(items):
     return with_top_gap('\n'.join(lines))
 
 
+def most_recent_due_notice(items):
+    """Among reminder dues, pick the newest published notice (for reply-to)."""
+    scored = []
+    for n in items or []:
+        pub = (n.get('published') or {}).get('telegram') or []
+        if not any((ref.get('message_ids') or []) for ref in pub):
+            continue
+        # prefer created_at (when it went live); fall back to updated_at
+        key = n.get('created_at') or n.get('updated_at') or ''
+        scored.append((key, n))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
+
+
+def reply_to_by_chat_from_notice(notice):
+    """Map chat_id -> first published message_id for reply_to_message_id."""
+    out = {}
+    if not notice:
+        return out
+    for ref in (notice.get('published') or {}).get('telegram') or []:
+        cid = str(ref.get('chat_id') or '')
+        mids = ref.get('message_ids') or []
+        if cid and mids:
+            out[cid] = int(mids[0])
+    return out
+
+
 def format_next_reminder_line(now=None):
     now = now or dn.now_npt()
     secs = dn.seconds_until_next_6pm_npt(now)
@@ -276,7 +305,7 @@ class TgMenu:
             ]
         })
 
-    async def send(self, chat_id, text, reply_markup=None, track=None):
+    async def send(self, chat_id, text, reply_markup=None, track=None, reply_to_message_id=None):
         # Telegram text limit 4096
         chunks = []
         text = text or ''
@@ -288,11 +317,23 @@ class TgMenu:
         ids = []
         for i, chunk in enumerate(chunks):
             payload = {'chat_id': chat_id, 'text': chunk}
+            # only first chunk replies — keeps thread on the original notice
+            if reply_to_message_id is not None and i == 0:
+                payload['reply_to_message_id'] = int(reply_to_message_id)
+                payload['allow_sending_without_reply'] = True
             if reply_markup is not None and i == len(chunks) - 1:
                 payload['reply_markup'] = json.dumps(reply_markup)
             r = await self.api_post('sendMessage', data=payload)
             if r.get('ok'):
                 ids.append(r['result']['message_id'])
+            elif reply_to_message_id is not None and i == 0:
+                # deleted/missing original — send without reply
+                print(f'[BOT] reply_to fail chat={chat_id}: {r.get("description")}; sending bare')
+                payload.pop('reply_to_message_id', None)
+                payload.pop('allow_sending_without_reply', None)
+                r2 = await self.api_post('sendMessage', data=payload)
+                if r2.get('ok'):
+                    ids.append(r2['result']['message_id'])
         if track is None:
             track = self._in_wizard(chat_id)
         if track:
@@ -347,11 +388,15 @@ class TgMenu:
                 ok_any = True
         return ok_any
 
-    async def send_all_tracked(self, text):
-        """Send to all chats; return telegram refs for later delete/edit."""
+    async def send_all_tracked(self, text, reply_to_by_chat=None):
+        """Send to all chats; return telegram refs for later delete/edit.
+        reply_to_by_chat: optional {chat_id: message_id} to thread under a notice.
+        """
+        reply_to_by_chat = reply_to_by_chat or {}
         tg_refs = []
         for cid in self.chat_ids:
-            ids = await self.send(cid, text, track=False)
+            reply_to = reply_to_by_chat.get(str(cid))
+            ids = await self.send(cid, text, track=False, reply_to_message_id=reply_to)
             if ids:
                 tg_refs.append({'chat_id': str(cid), 'message_ids': ids})
         return tg_refs
