@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import random
 from datetime import datetime, timezone
@@ -36,29 +37,42 @@ CHECK_EVERY = 600
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
-        if query.get('test', [None])[0] == 'tcioe':
-            self._handle_test_tcioe()
+        source = query.get('test', [None])[0]
+        if source in ('tcioe', 'exam'):
+            test_key = os.getenv('TEST_KEY')
+            if test_key and query.get('key', [None])[0] != test_key:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b'forbidden')
+                return
+            self._handle_test(source)
             return
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
 
-    def _handle_test_tcioe(self):
-        """Diagnostic endpoint: hit /?test=tcioe to check live whether the
-        direct (no-proxy) fetch works from this deployment's IP."""
+    def _handle_test(self, source):
+        """Diagnostic endpoint: hit /?test=tcioe or /?test=exam to check
+        live whether that scraper works from this deployment's IP, without
+        waiting for the next poll cycle. Set TEST_KEY to require ?key=... ."""
         started = datetime.now(timezone.utc)
         try:
-            notices, method, detail = asyncio.run(_get_tcioe_notices())
+            if source == 'tcioe':
+                notices, method, detail = asyncio.run(_get_tcioe_notices())
+            else:
+                notices, detail = asyncio.run(_get_exam_notices())
+                method = 'direct' if detail is None else None
             elapsed = (datetime.now(timezone.utc) - started).total_seconds()
             body = json.dumps({
                 'ok': detail is None,
+                'source': source,
                 'method': method,
                 'count': len(notices),
                 'detail': detail,
                 'elapsed_s': round(elapsed, 2),
             }).encode()
         except Exception as e:
-            body = json.dumps({'ok': False, 'method': None, 'error': str(e)}).encode()
+            body = json.dumps({'ok': False, 'source': source, 'error': str(e)}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -174,13 +188,16 @@ def _proxy_urls():
     return out
 
 
-async def get_exam():
+async def _get_exam_notices():
+    """Self-contained (own client, no shared state) so the /?test=exam
+    endpoint can call it from a different thread/event loop too."""
     try:
-        r = await http.get(
-            'https://exam.ioe.tu.edu.np/notices',
-            headers={'User-Agent': UA},
-            timeout=10,
-        )
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                'https://exam.ioe.tu.edu.np/notices',
+                headers={'User-Agent': UA},
+                timeout=10,
+            )
         r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
         notices = []
@@ -193,13 +210,20 @@ async def get_exam():
                     h = 'https://exam.ioe.tu.edu.np' + h
                 notices.append({'link': h, 'title': t, 'medias': None})
                 seen.add(h)
-        print(f'exam: {len(notices)}')
-        clear_scrape_error('exam')
-        return notices
+        return notices, None
     except Exception as e:
-        print(f'exam error: {e}')
-        await notify_scrape_error('exam', str(e))
+        return [], str(e)
+
+
+async def get_exam():
+    notices, detail = await _get_exam_notices()
+    if detail is not None:
+        print(f'exam error: {detail}')
+        await notify_scrape_error('exam', detail)
         return []
+    print(f'exam: {len(notices)}')
+    clear_scrape_error('exam')
+    return notices
 
 
 TCIOE_URL = 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at'
@@ -218,12 +242,22 @@ def _parse_tcioe(d):
 
 
 def _fetch_tcioe_direct_sync():
-    """Real Chrome TLS fingerprint, no proxy — cloudflare sometimes blocks
-    Render's IP by fingerprint/reputation rather than a hard IP ban."""
+    """Real Chrome TLS fingerprint, no proxy: cloudflare sometimes blocks
+    Render's IP by fingerprint/reputation rather than a hard IP ban.
+    A couple quick retries absorb transient network blips so a single
+    dropped connection doesn't cost a full 10 minute poll cycle."""
     from curl_cffi import requests as cffi_requests
-    r = cffi_requests.get(TCIOE_URL, headers=TCIOE_HEADERS, impersonate='chrome', timeout=15)
-    r.raise_for_status()
-    return r.json()
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = cffi_requests.get(TCIOE_URL, headers=TCIOE_HEADERS, impersonate='chrome', timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise last_err
 
 
 async def _get_tcioe_notices():
