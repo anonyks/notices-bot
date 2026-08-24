@@ -123,7 +123,8 @@ def discord_escape(text):
     return out
 
 
-# most webshare sub-accounts ran out of balance (402); only these still work
+# used for discord webhook rate-limit fallback; most webshare sub-accounts
+# ran out of balance (402), only these still work
 PROXY_HOSTS = [
     'p.webshare.io:80:kuqjlqsv-6:5k7q3uq6o6j5',
     'p.webshare.io:80:kuqjlqsv-10:5k7q3uq6o6j5',
@@ -163,8 +164,6 @@ def clear_scrape_error(source):
     scrape_error_state[source] = ''
 
 
-# tcioe (cloudflare) blocks Render's IP; try a real browser TLS fingerprint
-# directly first, fall back to webshare proxies only if that fails
 def _proxy_urls():
     proxies_list = list(PROXY_HOSTS)
     random.shuffle(proxies_list)
@@ -228,35 +227,12 @@ def _fetch_tcioe_direct_sync():
 
 
 async def _get_tcioe_notices():
-    """Try a direct curl_cffi request first, fall back to proxies.
-    Returns (notices, method, detail) where method is 'direct'/'proxy'/None."""
+    """Returns (notices, method, detail) where method is 'direct' or None."""
     try:
         d = await asyncio.to_thread(_fetch_tcioe_direct_sync)
         return _parse_tcioe(d), 'direct', None
     except Exception as e:
-        direct_err = str(e)
-
-    last_status = None
-    for proxy in _proxy_urls():
-        try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
-                r = await client.get(TCIOE_URL, headers=TCIOE_HEADERS)
-            if r.status_code == 200:
-                return _parse_tcioe(r.json()), 'proxy', None
-            last_status = r.status_code
-            if r.status_code == 402:
-                continue
-            return [], None, f'HTTP {r.status_code}'
-        except Exception:
-            continue
-
-    if last_status == 402:
-        detail = f'direct failed ({direct_err}); proxy 402 on all retries'
-    elif last_status is not None:
-        detail = f'direct failed ({direct_err}); proxy HTTP {last_status}'
-    else:
-        detail = f'direct failed ({direct_err}); proxy request failed on all retries'
-    return [], None, detail
+        return [], None, str(e)
 
 
 async def get_tcioe():
