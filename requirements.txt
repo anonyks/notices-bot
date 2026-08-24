@@ -1,4 +1,5 @@
 httpx==0.28.1
+curl_cffi==0.15.0
 beautifulsoup4==4.13.4
 python-dotenv==1.1.1
 nepali-datetime>=1.0.0

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 from bs4 import BeautifulSoup
@@ -34,9 +35,34 @@ CHECK_EVERY = 600
 # simple health check server for Render
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        query = parse_qs(urlparse(self.path).query)
+        if query.get('test', [None])[0] == 'tcioe':
+            self._handle_test_tcioe()
+            return
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
+
+    def _handle_test_tcioe(self):
+        """Diagnostic endpoint: hit /?test=tcioe to check live whether the
+        direct (no-proxy) fetch works from this deployment's IP."""
+        started = datetime.now(timezone.utc)
+        try:
+            notices, method, detail = asyncio.run(_get_tcioe_notices())
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+            body = json.dumps({
+                'ok': detail is None,
+                'method': method,
+                'count': len(notices),
+                'detail': detail,
+                'elapsed_s': round(elapsed, 2),
+            }).encode()
+        except Exception as e:
+            body = json.dumps({'ok': False, 'method': None, 'error': str(e)}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass
@@ -97,20 +123,11 @@ def discord_escape(text):
     return out
 
 
+# most webshare sub-accounts ran out of balance (402); only these still work
 PROXY_HOSTS = [
-    'p.webshare.io:80:fexpjpkd-rotate:rx3hdyggy83o',
-    'p.webshare.io:80:jtvvlemp-rotate:0fzy5ooc6rn3',
-    'p.webshare.io:80:udvdinld-rotate:y3j6holjigwx',
-    'p.webshare.io:80:zyqxlgxy-rotate:577vhwv9e3fv',
-    'p.webshare.io:80:cgiyhodh-rotate:yjci8dset9za',
     'p.webshare.io:80:kuqjlqsv-6:5k7q3uq6o6j5',
-    'p.webshare.io:80:xiggectx-rotate:bv9gz5sk71t3',
-    'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
-    'p.webshare.io:80:yllxoyzx-rotate:9nntx8ghhmfn',
-    'p.webshare.io:80:dctxwewh-rotate:cb8a3yevk88c',
-    'p.webshare.io:80:nckjgccq-rotate:a5gylwfr5l22',
-    'p.webshare.io:80:cihjvsyy-rotate:dwcbfsv8dch8',
     'p.webshare.io:80:kuqjlqsv-10:5k7q3uq6o6j5',
+    'p.webshare.io:80:lwjfhxdd-rotate:eu1kcrzwlazu',
 ]
 
 
@@ -146,12 +163,8 @@ def clear_scrape_error(source):
     scrape_error_state[source] = ''
 
 
-# tcioe blocks direct requests; rotate through webshare proxies
-def _proxy_url():
-    host, port, user, pwd = random.choice(PROXY_HOSTS).split(':')
-    return f'http://{user}:{pwd}@{host}:{port}'
-
-
+# tcioe (cloudflare) blocks Render's IP; try a real browser TLS fingerprint
+# directly first, fall back to webshare proxies only if that fails
 def _proxy_urls():
     proxies_list = list(PROXY_HOSTS)
     random.shuffle(proxies_list)
@@ -190,53 +203,71 @@ async def get_exam():
         return []
 
 
-async def get_tcioe():
-    url = 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at'
-    headers = {'User-Agent': UA, 'Accept': 'application/json'}
-    try:
-        r = None
-        last_status = None
-        for proxy in _proxy_urls()[:4]:
-            try:
-                async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
-                    r = await client.get(url, headers=headers)
-                if r.status_code == 200:
-                    break
-                last_status = r.status_code
-                if r.status_code == 402:
-                    continue
-                print(f'tcioe: HTTP {r.status_code}')
-                await notify_scrape_error('tcioe', f'HTTP {r.status_code}')
-                return []
-            except Exception:
-                continue
-        if r is None or r.status_code != 200:
-            if last_status == 402:
-                print('tcioe: proxy 402 on all retries')
-                await notify_scrape_error('tcioe', 'proxy 402 on all retries')
-            elif last_status is not None:
-                print(f'tcioe: HTTP {last_status}')
-                await notify_scrape_error('tcioe', f'HTTP {last_status}')
-            else:
-                print('tcioe: request failed on all retries')
-                await notify_scrape_error('tcioe', 'request failed on all retries')
-            return []
+TCIOE_URL = 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at'
+TCIOE_HEADERS = {'User-Agent': UA, 'Accept': 'application/json'}
 
-        d = r.json()
-        notices = []
-        for i in d.get('results', []):
-            notices.append({
-                'link': f"https://tcioe.edu.np/notices/{i.get('slug', i.get('uuid'))}",
-                'title': i.get('title', ''),
-                'medias': i.get('medias', []),
-            })
-        print(f'tcioe: {len(notices)}')
-        clear_scrape_error('tcioe')
-        return notices
+
+def _parse_tcioe(d):
+    notices = []
+    for i in d.get('results', []):
+        notices.append({
+            'link': f"https://tcioe.edu.np/notices/{i.get('slug', i.get('uuid'))}",
+            'title': i.get('title', ''),
+            'medias': i.get('medias', []),
+        })
+    return notices
+
+
+def _fetch_tcioe_direct_sync():
+    """Real Chrome TLS fingerprint, no proxy — cloudflare sometimes blocks
+    Render's IP by fingerprint/reputation rather than a hard IP ban."""
+    from curl_cffi import requests as cffi_requests
+    r = cffi_requests.get(TCIOE_URL, headers=TCIOE_HEADERS, impersonate='chrome', timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+async def _get_tcioe_notices():
+    """Try a direct curl_cffi request first, fall back to proxies.
+    Returns (notices, method, detail) where method is 'direct'/'proxy'/None."""
+    try:
+        d = await asyncio.to_thread(_fetch_tcioe_direct_sync)
+        return _parse_tcioe(d), 'direct', None
     except Exception as e:
-        print(f'tcioe error: {e}')
-        await notify_scrape_error('tcioe', str(e))
+        direct_err = str(e)
+
+    last_status = None
+    for proxy in _proxy_urls():
+        try:
+            async with httpx.AsyncClient(proxy=proxy, timeout=15) as client:
+                r = await client.get(TCIOE_URL, headers=TCIOE_HEADERS)
+            if r.status_code == 200:
+                return _parse_tcioe(r.json()), 'proxy', None
+            last_status = r.status_code
+            if r.status_code == 402:
+                continue
+            return [], None, f'HTTP {r.status_code}'
+        except Exception:
+            continue
+
+    if last_status == 402:
+        detail = f'direct failed ({direct_err}); proxy 402 on all retries'
+    elif last_status is not None:
+        detail = f'direct failed ({direct_err}); proxy HTTP {last_status}'
+    else:
+        detail = f'direct failed ({direct_err}); proxy request failed on all retries'
+    return [], None, detail
+
+
+async def get_tcioe():
+    notices, method, detail = await _get_tcioe_notices()
+    if detail is not None:
+        print(f'tcioe: {detail}')
+        await notify_scrape_error('tcioe', detail)
         return []
+    print(f'tcioe: {len(notices)} (via {method})')
+    clear_scrape_error('tcioe')
+    return notices
 
 
 async def get_notice_attachments(url):
