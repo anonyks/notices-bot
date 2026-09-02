@@ -125,6 +125,12 @@ discord_direct_blocked_until = 0.0
 scrape_error_state = {'exam': '', 'tcioe': ''}
 
 
+def exc_str(e):
+    """str(e) is blank for some httpx/network exceptions (e.g. during a
+    deploy handoff); fall back to the exception type so logs stay useful."""
+    return str(e) or type(e).__name__
+
+
 def discord_escape(text):
     """Keep Discord from eating newlines / turning _expired_ into italics."""
     if not text:
@@ -212,7 +218,7 @@ async def _get_exam_notices():
                 seen.add(h)
         return notices, None
     except Exception as e:
-        return [], str(e)
+        return [], exc_str(e)
 
 
 async def get_exam():
@@ -266,7 +272,7 @@ async def _get_tcioe_notices():
         d = await asyncio.to_thread(_fetch_tcioe_direct_sync)
         return _parse_tcioe(d), 'direct', None
     except Exception as e:
-        return [], None, str(e)
+        return [], None, exc_str(e)
 
 
 async def get_tcioe():
