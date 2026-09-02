@@ -650,6 +650,7 @@ async def delete_discord_message(webhook_url, message_id):
 
 
 TELEGRAM_UPLOAD_MAX = 50 * 1024 * 1024  # bot API upload cap
+TELEGRAM_PHOTO_MAX = 10 * 1024 * 1024  # sendPhoto's own (lower) cap
 
 
 async def send_telegram(title, url, medias):
@@ -680,8 +681,11 @@ async def send_telegram(title, url, medias):
                         fn = item['url'].split('/')[-1].split('?')[0] or (
                             'image.png' if item['kind'] == 'image' else 'file.pdf'
                         )
-                        field = 'photo' if item['kind'] == 'image' else 'document'
-                        endpoint = 'sendPhoto' if item['kind'] == 'image' else 'sendDocument'
+                        # sendPhoto rejects anything over 10MB; fall back to
+                        # sendDocument so oversized scans still get delivered.
+                        is_photo = item['kind'] == 'image' and len(body) <= TELEGRAM_PHOTO_MAX
+                        field = 'photo' if is_photo else 'document'
+                        endpoint = 'sendPhoto' if is_photo else 'sendDocument'
                         r = await http.post(
                             f'https://api.telegram.org/bot{tg_token}/{endpoint}',
                             data={'chat_id': chat_id, 'caption': local_msg},
