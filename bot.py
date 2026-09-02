@@ -649,6 +649,9 @@ async def delete_discord_message(webhook_url, message_id):
         return False
 
 
+TELEGRAM_UPLOAD_MAX = 50 * 1024 * 1024  # bot API upload cap
+
+
 async def send_telegram(title, url, medias):
     """Send to Telegram chats. Returns True if at least one send succeeded."""
     posted_any = False
@@ -663,18 +666,28 @@ async def send_telegram(title, url, medias):
                 local_msg = msg
                 for item in files[:3]:
                     try:
-                        if item['kind'] == 'image':
-                            r = await http.post(
-                                f'https://api.telegram.org/bot{tg_token}/sendPhoto',
-                                data={'chat_id': chat_id, 'photo': item['url'], 'caption': local_msg},
-                                timeout=30,
-                            )
-                        else:
-                            r = await http.post(
-                                f'https://api.telegram.org/bot{tg_token}/sendDocument',
-                                data={'chat_id': chat_id, 'document': item['url'], 'caption': local_msg},
-                                timeout=30,
-                            )
+                        # Telegram fetching the source URL server-side is unreliable
+                        # (cloudflare-protected origins, missing headers, etc) - download
+                        # the bytes ourselves and upload them directly instead.
+                        fr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=30)
+                        if fr.status_code != 200:
+                            print(f'telegram media download HTTP {fr.status_code}: {item["url"]}')
+                            continue
+                        body = fr.content
+                        if len(body) > TELEGRAM_UPLOAD_MAX:
+                            print(f'telegram: skip fat file ({len(body)/1024/1024:.1f}MB)')
+                            continue
+                        fn = item['url'].split('/')[-1].split('?')[0] or (
+                            'image.png' if item['kind'] == 'image' else 'file.pdf'
+                        )
+                        field = 'photo' if item['kind'] == 'image' else 'document'
+                        endpoint = 'sendPhoto' if item['kind'] == 'image' else 'sendDocument'
+                        r = await http.post(
+                            f'https://api.telegram.org/bot{tg_token}/{endpoint}',
+                            data={'chat_id': chat_id, 'caption': local_msg},
+                            files={field: (fn, body)},
+                            timeout=60,
+                        )
                         if r.status_code == 200:
                             print('telegram: sent')
                             posted_any = True
