@@ -290,15 +290,26 @@ def _parse_tcioe(d):
     return notices
 
 
+TCIOE_HEADERS = {
+    'User-Agent': UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.7',
+    'Cache-Control': 'max-age=0',
+    'Upgrade-Insecure-Requests': '1',
+}
+
+
 async def _get_tcioe_notices():
     """portal-api.tcioe.edu.np serves the same data the old cdn.tcioe.edu.np
-    endpoint did - plain request, no browser or cookies needed. Like every
-    other tcioe endpoint tried so far it's still Cloudflare-fronted, so it
-    may hit the same Render-IP block; untested from Render as of writing.
+    endpoint did. A bare httpx request (default headers) gets a 403 from
+    Render's IP but a 200 from elsewhere; sending the full browser-style
+    header set a real navigation sends (Accept-Language, Cache-Control,
+    etc, not just Accept: */*) in case Cloudflare's scoring weighs header
+    completeness together with IP reputation, not IP alone.
     Returns (notices, method, detail)."""
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(TCIOE_API_URL, timeout=15)
+            r = await client.get(TCIOE_API_URL, headers=TCIOE_HEADERS, timeout=15)
         r.raise_for_status()
         return _parse_tcioe(r.json()), 'direct', None
     except Exception as e:
