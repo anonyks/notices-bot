@@ -273,90 +273,35 @@ async def get_exam():
     return notices
 
 
-TCIOE_PAGE_URL = 'https://tcioe.edu.np/notices'
-TCIOE_LIST_URL = (
-    'https://tcioe.edu.np/api/v1/public/notice-mod/notices'
-    '?offset=0&limit=10&is_approved_by_campus=true&ordering=-published_at'
-)
-
-# Cloudflare's clearance cookie from one browser visit keeps working over
-# plain HTTP for a while, so the browser only needs to run again once that
-# cookie stops being accepted, not on every single poll cycle.
-_tcioe_session = {'cookies': None, 'ua': None}
+TCIOE_API_URL = 'https://portal.tcioe.edu.np/api/notices?limit=10'
 
 
 def _parse_tcioe(d):
     notices = []
-    for i in d.get('results', []):
+    for i in d.get('notices', []):
+        medias = []
+        if i.get('pdf'):
+            medias.append({'file': i['pdf'], 'mediaType': 'DOCUMENT'})
+        if i.get('image'):
+            medias.append({'file': i['image'], 'mediaType': 'IMAGE'})
         notices.append({
             'link': f"https://tcioe.edu.np/notices/{i.get('slug', i.get('uuid'))}",
             'title': i.get('title', ''),
-            'medias': i.get('medias', []),
+            'medias': medias,
         })
     return notices
 
 
-def _refresh_tcioe_session_sync():
-    """Launches a real browser just long enough to pick up tcioe's Cloudflare
-    clearance cookie. --disable-gpu / imagesEnabled=false keep this quick and
-    light on RAM, which matters on Render's free tier."""
-    from patchright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=['--blink-settings=imagesEnabled=false', '--disable-gpu'],
-        )
-        try:
-            page = browser.new_page()
-            page.goto(TCIOE_PAGE_URL, timeout=15000)
-            # Cloudflare's JS challenge takes several seconds to auto-resolve;
-            # a datacenter IP (Render) is more likely to actually be shown
-            # one than a residential IP, so give it real time to finish.
-            page.wait_for_timeout(5000)
-            _tcioe_session['cookies'] = {c['name']: c['value'] for c in page.context.cookies()}
-            _tcioe_session['ua'] = page.evaluate('navigator.userAgent')
-        finally:
-            browser.close()
-
-
-def _fetch_tcioe_browser_sync():
-    """tcioe moved off cdn.tcioe.edu.np; the new endpoint (hosted on the main
-    site) rejects a plain request outright, even with a spoofed Chrome TLS
-    fingerprint - it needs a real browser to pass Cloudflare's check once.
-    See _refresh_tcioe_session_sync for why a browser isn't launched on
-    every call."""
-    if _tcioe_session['cookies'] is None:
-        _refresh_tcioe_session_sync()
-
-    last_detail = 'unknown'
-    for attempt in range(2):
-        headers = {
-            'User-Agent': _tcioe_session['ua'],
-            'Referer': TCIOE_PAGE_URL,
-            'Accept': 'application/json',
-        }
-        try:
-            with httpx.Client(cookies=_tcioe_session['cookies'], headers=headers, timeout=15) as client:
-                r = client.get(TCIOE_LIST_URL)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get('results') is not None:
-                    return d
-                last_detail = f'HTTP 200 but no results key: {r.text[:200]!r}'
-            else:
-                last_detail = f'HTTP {r.status_code}: {r.text[:200]!r}'
-        except Exception as e:
-            last_detail = exc_str(e)
-        if attempt == 0:
-            _refresh_tcioe_session_sync()
-    raise RuntimeError(f'tcioe fetch failed even after refreshing session ({last_detail})')
-
-
 async def _get_tcioe_notices():
-    """Returns (notices, method, detail) where method is 'browser' or None."""
+    """portal.tcioe.edu.np/api/notices serves the same data as the main
+    site's notices page, same origin/data as cdn.tcioe.edu.np used to, but
+    isn't behind Cloudflare's bot challenge - plain request, no browser,
+    no cookies needed. Returns (notices, method, detail)."""
     try:
-        d = await asyncio.to_thread(_fetch_tcioe_browser_sync)
-        return _parse_tcioe(d), 'browser', None
+        async with httpx.AsyncClient() as client:
+            r = await client.get(TCIOE_API_URL, timeout=15)
+        r.raise_for_status()
+        return _parse_tcioe(r.json()), 'direct', None
     except Exception as e:
         return [], None, exc_str(e)
 
