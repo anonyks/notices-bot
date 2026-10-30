@@ -293,10 +293,12 @@ def _parse_tcioe(d):
 
 
 async def _get_tcioe_notices():
-    """portal.tcioe.edu.np/api/notices serves the same data as the main
-    site's notices page, same origin/data as cdn.tcioe.edu.np used to, but
-    isn't behind Cloudflare's bot challenge - plain request, no browser,
-    no cookies needed. Returns (notices, method, detail)."""
+    """portal.tcioe.edu.np/api/notices serves the same notices as the main
+    site, plain request, no browser or cookies needed - works from most IPs,
+    but Render's IP currently gets a 403 here (tcioe's Cloudflare setup
+    appears to IP-reputation-block Render broadly, not just this endpoint;
+    confirmed by the identical request succeeding from a different IP).
+    Returns (notices, method, detail)."""
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(TCIOE_API_URL, timeout=15)
