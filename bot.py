@@ -123,7 +123,10 @@ menu = None
 discord_lock = asyncio.Lock()
 discord_cooldown_until = 0.0
 discord_direct_blocked_until = 0.0
-scrape_error_state = {'exam': '', 'tcioe': ''}
+scrape_error_state = {
+    'exam': {'key': '', 'refs': []},
+    'tcioe': {'key': '', 'refs': []},
+}
 
 
 def exc_str(e):
@@ -173,6 +176,29 @@ async def notify_ops(text):
         return False
 
 
+async def notify_ops_tracked(text):
+    """Like notify_ops, but returns the sent message refs so they can be
+    deleted later (used to replace scrape-error notices instead of piling
+    them up)."""
+    if not menu:
+        return []
+    try:
+        return await menu.send_all_tracked(text)
+    except Exception as e:
+        print(f'[OPS] notify error: {e}')
+        return []
+
+
+async def _delete_ops_refs(refs):
+    if not menu or not refs:
+        return
+    for ref in refs:
+        try:
+            await menu._delete_msgs(ref['chat_id'], ref['message_ids'])
+        except Exception as e:
+            print(f'[OPS] cleanup old notice: {e}')
+
+
 async def notify_scrape_error(source, detail):
     detail = (detail or '').strip()[:300]
     # Dedup on a normalized key: curl/timeout messages embed a millisecond
@@ -180,14 +206,23 @@ async def notify_scrape_error(source, detail):
     # and the same recurring error (e.g. upstream site down) re-notifies on
     # every single poll cycle instead of just once.
     key = re.sub(r'\d+', '#', detail)
-    if scrape_error_state.get(source) == key:
+    state = scrape_error_state.setdefault(source, {'key': '', 'refs': []})
+    if state['key'] == key:
         return
-    scrape_error_state[source] = key
-    await notify_ops(f'Scrape error: {source}\n{detail}')
+    old_refs = state['refs']
+    new_refs = await notify_ops_tracked(f'Scrape error: {source}\n{detail}')
+    state['key'] = key
+    state['refs'] = new_refs
+    # Only one "Scrape error: <source>" notice should be visible at a time;
+    # clear the previous one now that its replacement is posted.
+    await _delete_ops_refs(old_refs)
 
 
 def clear_scrape_error(source):
-    scrape_error_state[source] = ''
+    state = scrape_error_state.get(source)
+    if state and state['refs']:
+        asyncio.ensure_future(_delete_ops_refs(state['refs']))
+    scrape_error_state[source] = {'key': '', 'refs': []}
 
 
 def _proxy_urls():
