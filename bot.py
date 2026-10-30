@@ -273,8 +273,7 @@ async def get_exam():
     return notices
 
 
-TCIOE_URL = 'https://cdn.tcioe.edu.np/api/v1/public/notice-mod/notices?limit=10&is_approved_by_campus=true&ordering=-published_at'
-TCIOE_HEADERS = {'User-Agent': UA, 'Accept': 'application/json'}
+TCIOE_PAGE_URL = 'https://tcioe.edu.np/notices'
 
 
 def _parse_tcioe(d):
@@ -288,30 +287,49 @@ def _parse_tcioe(d):
     return notices
 
 
-def _fetch_tcioe_direct_sync():
-    """Real Chrome TLS fingerprint, no proxy: cloudflare sometimes blocks
-    Render's IP by fingerprint/reputation rather than a hard IP ban.
-    A couple quick retries absorb transient network blips so a single
-    dropped connection doesn't cost a full 10 minute poll cycle."""
-    from curl_cffi import requests as cffi_requests
+def _fetch_tcioe_browser_sync():
+    """tcioe moved off cdn.tcioe.edu.np; the new API (same host as the site)
+    rejects even a Chrome-TLS-impersonated request with a clean 404 - it
+    needs an actual browser, not just spoofed headers/fingerprint. Scrapling's
+    StealthyFetcher drives a real (patched) Chromium to load the public
+    notices page and captures the same JSON response the page's own JS gets."""
+    from scrapling.fetchers import StealthyFetcher
+
     last_err = None
-    for attempt in range(3):
+    for attempt in range(2):
+        data = {}
+
+        def _capture(page, _data=data):
+            # The page also fires /notice-mod/notices/categories and
+            # /notice-mod/notices/departments calls, a different shape that
+            # would silently stomp the real list via dict.update() - the
+            # trailing '?' requires the query string the list endpoint has.
+            page.on(
+                'response',
+                lambda r: _data.update(r.json()) if 'notice-mod/notices?' in r.url and r.ok else None,
+            )
+
         try:
-            r = cffi_requests.get(TCIOE_URL, headers=TCIOE_HEADERS, impersonate='chrome', timeout=15)
-            r.raise_for_status()
-            return r.json()
+            # disable_resources skips images/css/fonts: faster and much
+            # lighter on RAM, which matters on Render's free tier.
+            StealthyFetcher.fetch(
+                TCIOE_PAGE_URL, page_setup=_capture, wait=1500, disable_resources=True,
+            )
+            if data.get('results') is not None:
+                return data
+            last_err = RuntimeError('no notices in captured response')
         except Exception as e:
             last_err = e
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
+        if attempt == 0:
+            time.sleep(3)
     raise last_err
 
 
 async def _get_tcioe_notices():
-    """Returns (notices, method, detail) where method is 'direct' or None."""
+    """Returns (notices, method, detail) where method is 'browser' or None."""
     try:
-        d = await asyncio.to_thread(_fetch_tcioe_direct_sync)
-        return _parse_tcioe(d), 'direct', None
+        d = await asyncio.to_thread(_fetch_tcioe_browser_sync)
+        return _parse_tcioe(d), 'browser', None
     except Exception as e:
         return [], None, exc_str(e)
 
