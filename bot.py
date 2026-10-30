@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import asyncio
@@ -174,9 +175,14 @@ async def notify_ops(text):
 
 async def notify_scrape_error(source, detail):
     detail = (detail or '').strip()[:300]
-    if scrape_error_state.get(source) == detail:
+    # Dedup on a normalized key: curl/timeout messages embed a millisecond
+    # count that differs every call, so comparing the raw text never matches
+    # and the same recurring error (e.g. upstream site down) re-notifies on
+    # every single poll cycle instead of just once.
+    key = re.sub(r'\d+', '#', detail)
+    if scrape_error_state.get(source) == key:
         return
-    scrape_error_state[source] = detail
+    scrape_error_state[source] = key
     await notify_ops(f'Scrape error: {source}\n{detail}')
 
 
