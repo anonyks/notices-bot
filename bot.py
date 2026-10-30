@@ -273,31 +273,28 @@ async def get_exam():
     return notices
 
 
-TCIOE_API_URL = 'https://portal.tcioe.edu.np/api/notices?limit=10'
+TCIOE_API_URL = (
+    'https://portal-api.tcioe.edu.np/api/v1/public/notice-mod/notices'
+    '?offset=0&limit=10&is_approved_by_campus=true&ordering=-published_at'
+)
 
 
 def _parse_tcioe(d):
     notices = []
-    for i in d.get('notices', []):
-        medias = []
-        if i.get('pdf'):
-            medias.append({'file': i['pdf'], 'mediaType': 'DOCUMENT'})
-        if i.get('image'):
-            medias.append({'file': i['image'], 'mediaType': 'IMAGE'})
+    for i in d.get('results', []):
         notices.append({
             'link': f"https://tcioe.edu.np/notices/{i.get('slug', i.get('uuid'))}",
             'title': i.get('title', ''),
-            'medias': medias,
+            'medias': i.get('medias', []),
         })
     return notices
 
 
 async def _get_tcioe_notices():
-    """portal.tcioe.edu.np/api/notices serves the same notices as the main
-    site, plain request, no browser or cookies needed - works from most IPs,
-    but Render's IP currently gets a 403 here (tcioe's Cloudflare setup
-    appears to IP-reputation-block Render broadly, not just this endpoint;
-    confirmed by the identical request succeeding from a different IP).
+    """portal-api.tcioe.edu.np serves the same data the old cdn.tcioe.edu.np
+    endpoint did - plain request, no browser or cookies needed. Like every
+    other tcioe endpoint tried so far it's still Cloudflare-fronted, so it
+    may hit the same Render-IP block; untested from Render as of writing.
     Returns (notices, method, detail)."""
     try:
         async with httpx.AsyncClient() as client:
