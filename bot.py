@@ -274,6 +274,15 @@ async def get_exam():
 
 
 TCIOE_PAGE_URL = 'https://tcioe.edu.np/notices'
+TCIOE_LIST_URL = (
+    'https://tcioe.edu.np/api/v1/public/notice-mod/notices'
+    '?offset=0&limit=10&is_approved_by_campus=true&ordering=-published_at'
+)
+
+# Cloudflare's clearance cookie from one browser visit keeps working over
+# plain HTTP for a while, so the browser only needs to run again once that
+# cookie stops being accepted, not on every single poll cycle.
+_tcioe_session = {'cookies': None, 'ua': None}
 
 
 def _parse_tcioe(d):
@@ -287,42 +296,52 @@ def _parse_tcioe(d):
     return notices
 
 
-def _fetch_tcioe_browser_sync():
-    """tcioe moved off cdn.tcioe.edu.np; the new API (same host as the site)
-    rejects even a Chrome-TLS-impersonated request with a clean 404 - it
-    needs an actual browser, not just spoofed headers/fingerprint. Scrapling's
-    StealthyFetcher drives a real (patched) Chromium to load the public
-    notices page and captures the same JSON response the page's own JS gets."""
-    from scrapling.fetchers import StealthyFetcher
-
-    last_err = None
-    for attempt in range(2):
-        data = {}
-
-        def _capture(page, _data=data):
-            # The page also fires /notice-mod/notices/categories and
-            # /notice-mod/notices/departments calls, a different shape that
-            # would silently stomp the real list via dict.update() - the
-            # trailing '?' requires the query string the list endpoint has.
-            page.on(
-                'response',
-                lambda r: _data.update(r.json()) if 'notice-mod/notices?' in r.url and r.ok else None,
-            )
-
+def _refresh_tcioe_session_sync():
+    """Launches a real browser just long enough to pick up tcioe's Cloudflare
+    clearance cookie. --disable-gpu / imagesEnabled=false keep this quick and
+    light on RAM, which matters on Render's free tier."""
+    from patchright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=['--blink-settings=imagesEnabled=false', '--disable-gpu'],
+        )
         try:
-            # disable_resources skips images/css/fonts: faster and much
-            # lighter on RAM, which matters on Render's free tier.
-            StealthyFetcher.fetch(
-                TCIOE_PAGE_URL, page_setup=_capture, wait=1500, disable_resources=True,
-            )
-            if data.get('results') is not None:
-                return data
-            last_err = RuntimeError('no notices in captured response')
-        except Exception as e:
-            last_err = e
+            page = browser.new_page()
+            page.goto(TCIOE_PAGE_URL, timeout=15000)
+            page.wait_for_timeout(800)
+            _tcioe_session['cookies'] = {c['name']: c['value'] for c in page.context.cookies()}
+            _tcioe_session['ua'] = page.evaluate('navigator.userAgent')
+        finally:
+            browser.close()
+
+
+def _fetch_tcioe_browser_sync():
+    """tcioe moved off cdn.tcioe.edu.np; the new endpoint (hosted on the main
+    site) rejects a plain request outright, even with a spoofed Chrome TLS
+    fingerprint - it needs a real browser to pass Cloudflare's check once.
+    See _refresh_tcioe_session_sync for why a browser isn't launched on
+    every call."""
+    if _tcioe_session['cookies'] is None:
+        _refresh_tcioe_session_sync()
+
+    for attempt in range(2):
+        headers = {
+            'User-Agent': _tcioe_session['ua'],
+            'Referer': TCIOE_PAGE_URL,
+            'Accept': 'application/json',
+        }
+        try:
+            with httpx.Client(cookies=_tcioe_session['cookies'], headers=headers, timeout=15) as client:
+                r = client.get(TCIOE_LIST_URL)
+            d = r.json() if r.status_code == 200 else None
+            if d and d.get('results') is not None:
+                return d
+        except Exception:
+            pass
         if attempt == 0:
-            time.sleep(3)
-    raise last_err
+            _refresh_tcioe_session_sync()
+    raise RuntimeError('tcioe fetch failed even after refreshing session')
 
 
 async def _get_tcioe_notices():
