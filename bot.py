@@ -309,7 +309,10 @@ def _refresh_tcioe_session_sync():
         try:
             page = browser.new_page()
             page.goto(TCIOE_PAGE_URL, timeout=15000)
-            page.wait_for_timeout(800)
+            # Cloudflare's JS challenge takes several seconds to auto-resolve;
+            # a datacenter IP (Render) is more likely to actually be shown
+            # one than a residential IP, so give it real time to finish.
+            page.wait_for_timeout(5000)
             _tcioe_session['cookies'] = {c['name']: c['value'] for c in page.context.cookies()}
             _tcioe_session['ua'] = page.evaluate('navigator.userAgent')
         finally:
@@ -325,6 +328,7 @@ def _fetch_tcioe_browser_sync():
     if _tcioe_session['cookies'] is None:
         _refresh_tcioe_session_sync()
 
+    last_detail = 'unknown'
     for attempt in range(2):
         headers = {
             'User-Agent': _tcioe_session['ua'],
@@ -334,14 +338,18 @@ def _fetch_tcioe_browser_sync():
         try:
             with httpx.Client(cookies=_tcioe_session['cookies'], headers=headers, timeout=15) as client:
                 r = client.get(TCIOE_LIST_URL)
-            d = r.json() if r.status_code == 200 else None
-            if d and d.get('results') is not None:
-                return d
-        except Exception:
-            pass
+            if r.status_code == 200:
+                d = r.json()
+                if d.get('results') is not None:
+                    return d
+                last_detail = f'HTTP 200 but no results key: {r.text[:200]!r}'
+            else:
+                last_detail = f'HTTP {r.status_code}: {r.text[:200]!r}'
+        except Exception as e:
+            last_detail = exc_str(e)
         if attempt == 0:
             _refresh_tcioe_session_sync()
-    raise RuntimeError('tcioe fetch failed even after refreshing session')
+    raise RuntimeError(f'tcioe fetch failed even after refreshing session ({last_detail})')
 
 
 async def _get_tcioe_notices():
