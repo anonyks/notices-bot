@@ -42,7 +42,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         query = parse_qs(urlparse(self.path).query)
         source = query.get('test', [None])[0]
-        if source in ('tcioe', 'exam'):
+        if source in ('tcioe', 'exam', 'routine'):
             test_key = os.getenv('TEST_KEY')
             if test_key and query.get('key', [None])[0] != test_key:
                 self.send_response(403)
@@ -56,25 +56,36 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'OK')
 
     def _handle_test(self, source):
-        """Diagnostic endpoint: hit /?test=tcioe or /?test=exam to check
-        live whether that scraper works from this deployment's IP, without
-        waiting for the next poll cycle. Set TEST_KEY to require ?key=... ."""
+        """Diagnostic endpoint: hit /?test=tcioe, /?test=exam or /?test=routine
+        to check live whether that fetch works from this deployment's IP,
+        without waiting for the next poll cycle. Read-only, never writes
+        state or sends Telegram/Discord. Set TEST_KEY to require ?key=... ."""
         started = datetime.now(timezone.utc)
         try:
             if source == 'tcioe':
                 notices, method, detail = asyncio.run(_get_tcioe_notices())
-            else:
+                count = len(notices)
+            elif source == 'exam':
                 notices, detail = asyncio.run(_get_exam_notices())
                 method = 'direct' if detail is None else None
+                count = len(notices)
+            else:
+                count, detail = asyncio.run(_test_routine())
+                method = 'direct' if detail is None else None
             elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-            body = json.dumps({
+            result = {
                 'ok': detail is None,
                 'source': source,
                 'method': method,
-                'count': len(notices),
+                'count': count,
                 'detail': detail,
                 'elapsed_s': round(elapsed, 2),
-            }).encode()
+            }
+            if source == 'routine':
+                saved = store.load_routine_state()
+                result['baseline_saved'] = bool(saved)
+                result['baseline_cells'] = len(saved.get('cells') or []) if saved else 0
+            body = json.dumps(result).encode()
         except Exception as e:
             body = json.dumps({'ok': False, 'source': source, 'error': str(e)}).encode()
         self.send_response(200)
@@ -328,6 +339,17 @@ async def get_tcioe():
     print(f'tcioe: {len(notices)} (via {method})')
     clear_scrape_error('tcioe')
     return notices
+
+
+async def _test_routine():
+    """Self-contained fetch-only check for /?test=routine. Never touches
+    store state or sends Telegram -- safe to hit anytime."""
+    try:
+        async with httpx.AsyncClient() as client:
+            raw_cells = await routine.fetch_routine(client)
+        return len(raw_cells), None
+    except Exception as e:
+        return 0, exc_str(e)
 
 
 async def get_notice_attachments(url):
