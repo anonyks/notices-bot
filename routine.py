@@ -11,7 +11,16 @@ import store
 
 ROUTINE_URL = 'https://routine.tcioe.edu.np/api/get-routine'
 ROUTINE_PARAMS = {'faculty': 'BCT', 'batch_year': '2081', 'section': 'AB', 'semester': 'sem5'}
-ROUTINE_HEADERS = {'x-routine-pass': 'tcioe-routne-929282383838383', 'Accept': 'application/json'}
+# Cloudflare blocks Render's IP on a bare request (same as tcioe's old
+# cdn block) -- the full browser-style header set gets through.
+ROUTINE_HEADERS = {
+    'x-routine-pass': 'tcioe-routne-929282383838383',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.7',
+    'Cache-Control': 'max-age=0',
+    'Upgrade-Insecure-Requests': '1',
+}
 
 DAY_ORDER = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 PERIODS = [
