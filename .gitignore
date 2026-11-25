@@ -13,6 +13,7 @@ posted.txt
 manual_notices.json
 scraped_notices.json
 reminder_sent_day.txt
+routine_state.json
 
 # IDE
 .vscode/

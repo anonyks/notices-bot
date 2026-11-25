@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 import store
 import dates_npt as dn
+import routine
 from media_compress import fit_discord_attachment, DISCORD_SOFT_MAX
 from tg_bot import (
     TgMenu,
@@ -32,6 +33,8 @@ from tg_bot import (
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
 # check every 10 min (was 5) so we use less Render bandwidth
 CHECK_EVERY = 600
+# routine changes rarely, check every 30 min not every 10
+ROUTINE_CHECK_EVERY = 1800
 
 
 # simple health check server for Render
@@ -852,6 +855,17 @@ async def scheduled_loop():
         await asyncio.sleep(30)
 
 
+async def routine_loop():
+    """Check the BCT 2081-AB sem5 routine for changes every 30 min. Telegram-only."""
+    print('[ROUTINE] Loop started (checks every 30 min)')
+    while True:
+        try:
+            await routine.check_and_notify(http, tg_token, tg_chat_ids)
+        except Exception as e:
+            print(f'[ROUTINE] error: {exc_str(e)}')
+        await asyncio.sleep(ROUTINE_CHECK_EVERY)
+
+
 async def reminder_loop():
     """At 6:00 PM Nepal time, remind about assignments due today + tomorrow. No catch-up if missed."""
     print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
@@ -1052,6 +1066,7 @@ async def main():
             _supervised('REMINDER', reminder_loop),
             _supervised('SCHEDULE', scheduled_loop),
             _supervised('HEALTH', keepalive_loop),
+            _supervised('ROUTINE', routine_loop),
         )
 
 

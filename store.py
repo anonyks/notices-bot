@@ -35,6 +35,29 @@ def reminder_path():
     return data_dir() / 'reminder_sent_day.txt'
 
 
+def routine_path():
+    return data_dir() / 'routine_state.json'
+
+
+def load_routine_state():
+    path = routine_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f'[STORE] routine state read error: {e}')
+        return None
+
+
+def save_routine_state(data):
+    path = routine_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data or {}, ensure_ascii=False, indent=2), encoding='utf-8')
+    schedule_gist_backup()
+
+
 def _load_reminder_state():
     """One gist-backed file: day + optional telegram/discord reminder message refs."""
     path = reminder_path()
@@ -215,6 +238,7 @@ def _snapshot():
         'posted': load_posted(),
         # single reminder blob (day + message refs) — kept in gist
         'reminder': st,
+        'routine': load_routine_state() or {},
         # legacy keys for older gist restores
         'reminder_day': st.get('day') or '',
         'reminder_posts': {
@@ -245,6 +269,10 @@ def _apply_snapshot(data):
                 if posts.get(k) is not None:
                     st[k] = posts[k]
         _save_reminder_state(st)
+
+    routine = data.get('routine')
+    if isinstance(routine, dict) and routine:
+        save_routine_state(routine)
     return True
 
 
@@ -270,6 +298,7 @@ def _migrate_cwd_files():
         'scraped_notices.json',
         'posted.txt',
         'reminder_sent_day.txt',
+        'routine_state.json',
     ):
         src = cwd / name
         dst = d / name

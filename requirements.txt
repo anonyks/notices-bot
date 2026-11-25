@@ -4,3 +4,4 @@ python-dotenv==1.1.1
 nepali-datetime>=1.0.0
 Pillow>=10.0.0
 PyMuPDF>=1.24.0
+weasyprint>=62.0
