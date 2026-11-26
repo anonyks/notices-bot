@@ -36,7 +36,7 @@ PDF_SEND_NAME = 'BCT_2081-AB_sem5_routine.pdf'
 # every field normalize_cell keeps (except the slot itself) must be listed here
 DIFF_FIELDS = [
     ('subject', 'subject'), ('subject_code', 'subject code'), ('room', 'room'),
-    ('teachers', 'teachers'), ('labGroup', 'lab group'), ('start_time', 'start'),
+    ('teachers', 'teacher'), ('labGroup', 'lab group'), ('start_time', 'start'),
     ('end_time', 'end'), ('periods', 'periods'), ('course_type', 'type'),
     ('isLab', 'lab'), ('dualLab', 'dual lab'), ('is_elective', 'elective'),
 ]
@@ -128,11 +128,20 @@ def diff_summary(old_cells, new_cells):
                     added.remove(n)
                     break
 
+    # the same change to the same subject becomes one line
+    groups = {}
+    for o, n in sorted(changed, key=lambda p: (_day_rank(p[0]['day']), p[0]['periodIndex'])):
+        what = '; '.join(f'{label} changed from {_show(f, o.get(f))} to {_show(f, n.get(f))}'
+                         for f, label in DIFF_FIELDS if o.get(f) != n.get(f))
+        groups.setdefault((n['subject'] or o['subject'], what), []).append(o)
     entries = []
-    for o, n in changed:
-        parts = [f'{label} changed from {_show(f, o.get(f))} to {_show(f, n.get(f))}'
-                 for f, label in DIFF_FIELDS if o.get(f) != n.get(f)]
-        entries.append((o, f"{_slot_label(o)} ({n['subject'] or o['subject']}): " + '; '.join(parts)))
+    for (subject, what), slots in groups.items():
+        if len(slots) == 1:
+            where = f'{_slot_label(slots[0])} ({subject})'
+        else:
+            days = ', '.join(dict.fromkeys(c['day'][:3] for c in slots))
+            where = f'{subject}, {len(slots)} classes ({days})'
+        entries.append((slots[0], f'{where}: {what}'))
     entries += [(o, f"{_slot_label(o)}: class removed, {o['subject']}") for o in removed]
     entries += [(n, f"{_slot_label(n)}: new class added, {n['subject']} ({_show('room', n['room'])})")
                 for n in added]
@@ -351,6 +360,37 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
         print(f"[ROUTINE] delivered: telegram={len(published['telegram'])} "
               f"discord={len(published['discord'])}")
         await _save_now(state)
+
+
+async def run_test(http, tg_token, chat_id, webhooks=()):
+    """Manual /routinetest. Sends the PDF alert to the asking Telegram chat only.
+    Discord webhooks are only read (GET), never posted to. Saved state is untouched."""
+    raw_cells = await fetch_routine(http)
+    cells = normalized_cells(raw_cells)
+    # replays the real teacher rename; falls back if that teacher is gone
+    new_name, old_name = 'Surya Bhakta Adhikari', 'Surya Adhikari'
+    if not any(new_name in c['teachers'] for c in cells):
+        new_name, old_name = next(t for c in cells for t in c['teachers']), 'SAMPLE OLD NAME'
+    previous = [dict(c, teachers=sorted(old_name if t == new_name else t for t in c['teachers']))
+                for c in cells]
+    text = build_message(diff_summary(previous, cells))
+    text = text.replace('ROUTINE CHANGED', 'TEST - routine change tracking', 1)
+    text = text.replace('Semester 5', 'Semester 5 (sample, not real)', 1)
+    pdf_bytes = await asyncio.to_thread(generate_pdf, raw_cells)
+    message_id, _ = await send_telegram_alert(http, tg_token, chat_id, text, pdf_bytes)
+
+    report = ['Routine test result',
+              f'Fetch: ok, {len(cells)} classes',
+              f'PDF: ok, {len(pdf_bytes) // 1024} KB',
+              f'Telegram: sent, message id {message_id}' if message_id else 'Telegram: not confirmed, check logs']
+    for n, url in enumerate((w for w in webhooks if w), 1):
+        try:
+            r = await http.get(url.split('?')[0], timeout=15)
+            status = 'reachable' if r.status_code == 200 else f'HTTP {r.status_code}'
+        except Exception as e:
+            status = type(e).__name__
+        report.append(f'Discord webhook {n}: {status} (read only, nothing posted)')
+    return '\n'.join(report)
 
 
 async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None, webhooks=()):

@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 
 import store
 import dates_npt as dn
+import routine
 
 # per-chat wizard state: { chat_id: {step, draft, ...} }
 sessions = {}
@@ -1394,6 +1395,14 @@ class TgMenu:
             return
         if txt.startswith('/status'):
             await self.cmd_status(chat_id, trigger_mid=msg.get('message_id'))
+            return
+        if txt == '/routinetest':
+            try:
+                report = await routine.run_test(self.http, self.token, chat_id, self.webhooks)
+            except Exception as e:
+                # type only: exception text can contain token-bearing URLs
+                report = f'Routine test failed: {type(e).__name__}'
+            await self.send(chat_id, report, track=False)
             return
         if txt.startswith('/cancel'):
             await self.cmd_cancel(chat_id, trigger_mid=msg.get('message_id'))
