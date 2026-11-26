@@ -51,6 +51,15 @@ class HealthHandler(BaseHTTPRequestHandler):
                 return
             self._handle_test(source)
             return
+        if query.get('send_test', [None])[0] == 'routine':
+            test_key = os.getenv('TEST_KEY')
+            if test_key and query.get('key', [None])[0] != test_key:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b'forbidden')
+                return
+            self._handle_send_test()
+            return
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
@@ -88,6 +97,20 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps(result).encode()
         except Exception as e:
             body = json.dumps({'ok': False, 'source': source, 'error': str(e)}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_send_test(self):
+        """One-off: /?send_test=routine actually posts a clearly-labeled TEST
+        message to Telegram + Discord from THIS deployment, to confirm the
+        real send path works from Render itself. Remove after use."""
+        try:
+            ok = asyncio.run(_send_routine_test_message())
+            body = json.dumps({'ok': True, 'sent': ok}).encode()
+        except Exception as e:
+            body = json.dumps({'ok': False, 'error': str(e)}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -875,6 +898,29 @@ async def scheduled_loop():
         except Exception as e:
             print(f'[SCHEDULE] error: {e}')
         await asyncio.sleep(30)
+
+
+async def _send_routine_test_message():
+    """One-off connectivity check, triggered via /?send_test=routine. Does not
+    touch routine_state or the real change-detection path."""
+    text = (
+        'TEST - routine change tracking\n'
+        '━━━━━━━━━━━━━━━━\n'
+        'Checking Telegram + Discord delivery from Render itself.\n'
+        'Not a real routine change, ignore.'
+    )
+    tg_ok = False
+    if tg_token and tg_chat_ids:
+        for chat_id in tg_chat_ids:
+            r = await http.post(
+                f'https://api.telegram.org/bot{tg_token}/sendMessage',
+                data={'chat_id': chat_id, 'text': text},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                tg_ok = True
+    disc_refs = await send_discord_text_file(text)
+    return {'telegram': tg_ok, 'discord': bool(disc_refs)}
 
 
 async def routine_loop():
