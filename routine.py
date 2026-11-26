@@ -1,7 +1,7 @@
-# BCT 2081-AB sem5 class routine change tracker. Telegram-only, no Discord.
+# BCT 2081-AB sem5 class routine change tracker.
 # First run only establishes a baseline (sends nothing); later runs notify
-# only when the routine content actually changed. State persists via
-# store.py so it survives Render redeploys.
+# (Telegram + Discord, like any other notice) only when the routine content
+# actually changed. State persists via store.py so it survives Render redeploys.
 import hashlib
 import json
 
@@ -65,9 +65,14 @@ def content_hash(cells):
     return hashlib.sha256(json.dumps(cells, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def _hm(t):
+    return (t or '')[:5]
+
+
 def diff_summary(old_cells, new_cells):
-    """One line per changed slot, showing only the fields that actually differ
-    (so a time/duration/lab-flag-only change is still visible, not just subject/room/teacher)."""
+    """One plain-English line per changed slot, naming exactly which fields
+    changed (so a time/duration/lab-flag-only change is still visible, not
+    just subject/room/teacher)."""
     def key(c):
         return (c['day'], c['periodIndex'], c['labGroup'])
 
@@ -79,12 +84,13 @@ def diff_summary(old_cells, new_cells):
             continue
         day = k[0]
         if o is None:
-            lines.append(f"+ {day}: added {n['subject']} ({n['start_time']}-{n['end_time']})")
+            lines.append(f"{day} {_hm(n['start_time'])}-{_hm(n['end_time'])}: new class added, {n['subject']}")
         elif n is None:
-            lines.append(f"- {day}: removed {o['subject']} ({o['start_time']}-{o['end_time']})")
+            lines.append(f"{day} {_hm(o['start_time'])}-{_hm(o['end_time'])}: class removed, {o['subject']}")
         else:
-            changed = [f'{label}: {o[f]} -> {n[f]}' for f, label in PDF_FIELDS if o[f] != n[f]]
-            lines.append(f"~ {day} P{k[1] + 1}: " + ' / '.join(changed))
+            subj = n['subject'] or o['subject']
+            parts = [f'{label} changed from {o[f]} to {n[f]}' for f, label in PDF_FIELDS if o[f] != n[f]]
+            lines.append(f"{day} {_hm(o['start_time'])}-{_hm(o['end_time'])} ({subj}): " + '; '.join(parts))
     return lines
 
 
@@ -205,9 +211,10 @@ async def send_telegram_document(http, tg_token, tg_chat_ids, caption, pdf_bytes
     return posted_any
 
 
-async def check_and_notify(http, tg_token, tg_chat_ids):
-    """Fetch, hash, compare vs saved baseline. Notify (Telegram only) on change.
-    First run ever just saves the baseline and returns -- never sends."""
+async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None):
+    """Fetch, hash, compare vs saved baseline. Notify (Telegram + Discord,
+    like any other notice) only on an actual change. First run ever just
+    saves the baseline and returns -- never sends."""
     raw_cells = await fetch_routine(http)
     cells = normalized_cells(raw_cells)
     h = content_hash(cells)
@@ -234,12 +241,20 @@ async def check_and_notify(http, tg_token, tg_chat_ids):
     for line in changes:
         print(' ', line)
 
-    if not tg_token or not tg_chat_ids:
-        print('[ROUTINE] no Telegram token/chat configured, skipping send')
+    pdf_bytes = generate_pdf(raw_cells)
+    text = build_message(changes)
+
+    if tg_token and tg_chat_ids:
+        tg_ok = await send_telegram_document(http, tg_token, tg_chat_ids, text, pdf_bytes, PDF_SEND_NAME)
+        print(f'[ROUTINE] telegram send {"ok" if tg_ok else "FAILED"}')
     else:
-        pdf_bytes = generate_pdf(raw_cells)
-        text = build_message(changes)
-        ok = await send_telegram_document(http, tg_token, tg_chat_ids, text, pdf_bytes, PDF_SEND_NAME)
-        print(f'[ROUTINE] telegram send {"ok" if ok else "FAILED"}')
+        print('[ROUTINE] no Telegram token/chat configured, skipping send')
+
+    if send_discord_text_file:
+        try:
+            disc_refs = await send_discord_text_file(text, file_bytes=pdf_bytes, filename=PDF_SEND_NAME)
+            print(f'[ROUTINE] discord send {"ok" if disc_refs else "FAILED"}')
+        except Exception as e:
+            print(f'[ROUTINE] discord error: {e}')
 
     store.save_routine_state({'hash': h, 'cells': cells})

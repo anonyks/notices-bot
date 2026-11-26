@@ -878,11 +878,11 @@ async def scheduled_loop():
 
 
 async def routine_loop():
-    """Check the BCT 2081-AB sem5 routine for changes every 30 min. Telegram-only."""
+    """Check the BCT 2081-AB sem5 routine for changes every 30 min."""
     print('[ROUTINE] Loop started (checks every 30 min)')
     while True:
         try:
-            await routine.check_and_notify(http, tg_token, tg_chat_ids)
+            await routine.check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file)
         except Exception as e:
             print(f'[ROUTINE] error: {exc_str(e)}')
         await asyncio.sleep(ROUTINE_CHECK_EVERY)
