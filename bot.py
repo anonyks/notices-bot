@@ -104,10 +104,13 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def _handle_send_test(self):
         """One-off: /?send_test=routine actually posts a clearly-labeled TEST
-        message to Telegram + Discord from THIS deployment, to confirm the
-        real send path works from Render itself. Remove after use."""
+        message (with PDF) to Telegram + Discord from THIS deployment, to
+        confirm the real send path works from Render itself. Scheduled onto
+        the main event loop (not a fresh one) since the shared http client
+        and send_discord_text_file are bound to it. Remove after use."""
         try:
-            ok = asyncio.run(_send_routine_test_message())
+            fut = asyncio.run_coroutine_threadsafe(_send_routine_test_message(), main_loop)
+            ok = fut.result(timeout=30)
             body = json.dumps({'ok': True, 'sent': ok}).encode()
         except Exception as e:
             body = json.dumps({'ok': False, 'error': str(e)}).encode()
@@ -157,6 +160,7 @@ if not w1 and not w2:
 offset = 0
 http = None
 menu = None
+main_loop = None
 discord_lock = asyncio.Lock()
 discord_cooldown_until = 0.0
 discord_direct_blocked_until = 0.0
@@ -907,19 +911,24 @@ async def _send_routine_test_message():
         'TEST - routine change tracking\n'
         '━━━━━━━━━━━━━━━━\n'
         'Checking Telegram + Discord delivery from Render itself.\n'
-        'Not a real routine change, ignore.'
+        'Not a real routine change, ignore.\n\n'
+        f'📎 {routine.PDF_SEND_NAME}'
     )
+    raw_cells = await routine.fetch_routine(http)
+    pdf_bytes = routine.generate_pdf(raw_cells)
+
     tg_ok = False
     if tg_token and tg_chat_ids:
         for chat_id in tg_chat_ids:
             r = await http.post(
-                f'https://api.telegram.org/bot{tg_token}/sendMessage',
-                data={'chat_id': chat_id, 'text': text},
-                timeout=15,
+                f'https://api.telegram.org/bot{tg_token}/sendDocument',
+                data={'chat_id': chat_id, 'caption': text},
+                files={'document': (routine.PDF_SEND_NAME, pdf_bytes, 'application/pdf')},
+                timeout=60,
             )
             if r.status_code == 200:
                 tg_ok = True
-    disc_refs = await send_discord_text_file(text)
+    disc_refs = await send_discord_text_file(text, file_bytes=pdf_bytes, filename=routine.PDF_SEND_NAME)
     return {'telegram': tg_ok, 'discord': bool(disc_refs)}
 
 
@@ -1116,7 +1125,8 @@ async def _supervised(name, coro_fn):
 
 
 async def main():
-    global http, menu
+    global http, menu, main_loop
+    main_loop = asyncio.get_running_loop()
     async with httpx.AsyncClient(follow_redirects=True) as client:
         http = client
         menu = TgMenu(
