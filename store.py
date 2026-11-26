@@ -340,6 +340,13 @@ def _pull_gist():
                 if meta.get('content') is not None:
                     raw = meta['content']
                     break
+        # the API cuts large files short; the full text is at raw_url
+        for meta in files.values():
+            if meta.get('truncated') and meta.get('content') == raw:
+                full = httpx.get(meta['raw_url'], timeout=30)
+                full.raise_for_status()
+                raw = full.text
+                break
         if not raw:
             print('[STORE] gist is empty')
             return False
@@ -354,6 +361,8 @@ def _pull_gist():
 
 
 _pushing = False
+# set while the boot restore is unfinished, so partial state never reaches the Gist
+_backup_blocked = False
 _push_lock = threading.Lock()
 _push_timer = None
 _PUSH_DELAY_SEC = 3.0
@@ -387,6 +396,9 @@ def _push_gist_now():
     global _pushing
     token, gist_id = _gist_config()
     if not token or not gist_id or httpx is None:
+        return
+    if _backup_blocked:
+        print('[STORE] gist backup skipped, restore not finished')
         return
     with _push_lock:
         if _pushing:
@@ -428,12 +440,34 @@ def _push_gist_now():
             _pushing = False
 
 
-def init_storage():
+def _restore_or_wait(on_restore_fail=None):
+    """Do not start on empty state when a Gist is configured but unreadable:
+    the next backup would overwrite every saved notice. Retry until it loads."""
+    global _backup_blocked
+    token, gist_id = _gist_config()
+    if not token or not gist_id or httpx is None:
+        return
+    _backup_blocked = True
+    attempt = 0
+    while not _pull_gist():
+        attempt += 1
+        wait = min(5 * 2 ** min(attempt - 1, 4), 60)
+        print(f'[STORE] restore failed (try {attempt}), bot is paused, retrying in {wait}s')
+        if attempt == 3 and on_restore_fail:
+            try:
+                on_restore_fail()
+            except Exception as e:
+                print(f'[STORE] restore warning failed: {type(e).__name__}')
+        time.sleep(wait)
+    _backup_blocked = False
+
+
+def init_storage(on_restore_fail=None):
     d = data_dir()
     print(f'[STORE] DATA_DIR={d}')
     _migrate_cwd_files()
     if not _local_has_data():
-        _pull_gist()
+        _restore_or_wait(on_restore_fail)
     token, gist_id = _gist_config()
     on_render = bool(os.getenv('RENDER') or os.getenv('RENDER_EXTERNAL_URL'))
     if on_render and not gist_id:

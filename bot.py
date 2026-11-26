@@ -593,8 +593,11 @@ async def send_discord(title, url, medias):
     return posted_any
 
 
-async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_to_refs=None):
+async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_to_refs=None,
+                                 only_webhooks=None, unsure=None):
     """Post to Discord webhooks. Returns [{webhook_url, message_id, ...}, ...] when possible.
+    only_webhooks limits which webhooks get it. unsure (a list) collects webhooks
+    that may have posted even though no ref came back.
     reply_to_refs: optional published discord refs — reply under matching webhook's message.
     """
     reply_by_hook = {}
@@ -605,7 +608,7 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_
 
     refs = []
     for w in [w1, w2]:
-        if not w:
+        if not w or (only_webhooks is not None and w not in only_webhooks):
             continue
         try:
             # wait=true so Discord returns the message id (needed for edit/delete)
@@ -673,7 +676,10 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_
                     print(f'discord reply-to rejected ({r.status_code}) — bare send')
                     r = await _post_json(body)
 
+            if unsure is not None and r.status_code >= 500:
+                unsure.append(w.split('?')[0].split('/')[-2])
             if r.status_code in (200, 201):
+                before = len(refs)
                 try:
                     j = r.json()
                     mid = j.get('id')
@@ -689,10 +695,14 @@ async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_
                         refs.append(ref)
                 except Exception:
                     pass
+                if unsure is not None and len(refs) == before:
+                    unsure.append(w.split('?')[0].split('/')[-2])
                 print('discord: manual/quick sent' + (' (reply)' if reply_mid else ''))
             else:
                 print(f'discord manual HTTP {r.status_code}: {r.text[:200]}')
         except Exception as e:
+            if unsure is not None and not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                unsure.append(w.split('?')[0].split('/')[-2])
             print(f'discord manual error: {e}')
     return refs
 
@@ -882,9 +892,13 @@ async def routine_loop():
     print('[ROUTINE] Loop started (checks every 30 min)')
     while True:
         try:
-            await routine.check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file)
+            await routine.check_and_notify(
+                http, tg_token, tg_chat_ids, send_discord_text_file, [w1, w2])
+            clear_scrape_error('routine')
         except Exception as e:
             print(f'[ROUTINE] error: {exc_str(e)}')
+            # same Telegram-only operator notice the other scrapers use
+            await notify_scrape_error('routine', exc_str(e))
         await asyncio.sleep(ROUTINE_CHECK_EVERY)
 
 
@@ -1092,11 +1106,24 @@ async def main():
         )
 
 
+def warn_restore_failed():
+    """Telegram-only operator warning; the async bot is not running yet."""
+    for chat_id in tg_chat_ids:
+        httpx.post(
+            f'https://api.telegram.org/bot{tg_token}/sendMessage',
+            data={'chat_id': chat_id, 'text': (
+                'Bot paused: could not load saved state from the Gist. '
+                'Retrying. Check the Render logs, GITHUB_TOKEN and STATE_GIST_ID.'
+            )},
+            timeout=15,
+        )
+
+
 # health server in background, then run monitor + telegram
 Thread(target=run_server, daemon=True).start()
 
 print('=' * 50)
 print('NOTICES BOT STARTING...')
 print('=' * 50)
-store.init_storage()
+store.init_storage(on_restore_fail=warn_restore_failed)
 asyncio.run(main())

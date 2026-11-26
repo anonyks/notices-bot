@@ -2,8 +2,12 @@
 # First run only establishes a baseline (sends nothing); later runs notify
 # (Telegram + Discord, like any other notice) only when the routine content
 # actually changed. State persists via store.py so it survives Render redeploys.
+import asyncio
 import hashlib
 import json
+from datetime import datetime, timezone
+
+import httpx
 
 from weasyprint import HTML
 
@@ -29,17 +33,26 @@ PERIODS = [
     ('VII', '13:45 - 14:30'), ('VIII', '14:30 - 15:15'), ('IX', '15:15 - 16:00'),
 ]
 PDF_SEND_NAME = 'BCT_2081-AB_sem5_routine.pdf'
-PDF_FIELDS = [
-    ('start_time', 'start'), ('end_time', 'end'), ('subject', 'subject'),
-    ('room', 'room'), ('teachers', 'teachers'), ('course_type', 'type'),
-    ('periods', 'periods'), ('isLab', 'lab'), ('dualLab', 'dual-lab'), ('is_elective', 'elective'),
+# every field normalize_cell keeps (except the slot itself) must be listed here
+DIFF_FIELDS = [
+    ('subject', 'subject'), ('subject_code', 'subject code'), ('room', 'room'),
+    ('teachers', 'teachers'), ('labGroup', 'lab group'), ('start_time', 'start'),
+    ('end_time', 'end'), ('periods', 'periods'), ('course_type', 'type'),
+    ('isLab', 'lab'), ('dualLab', 'dual lab'), ('is_elective', 'elective'),
 ]
+CAPTION_MAX = 1024  # Telegram document caption limit
+MAX_ATTEMPTS = 48  # about a day of retries at one per 30 min
+KEEP_ALERTS = 20  # finished alerts kept for their message ids
 
 
 async def fetch_routine(http):
     r = await http.get(ROUTINE_URL, params=ROUTINE_PARAMS, headers=ROUTINE_HEADERS, timeout=20)
     r.raise_for_status()
-    return r.json().get('cells') or []
+    cells = r.json().get('cells')
+    if not cells:
+        # never treat an empty or malformed reply as "every class removed"
+        raise ValueError('routine API returned no cells')
+    return cells
 
 
 def normalize_cell(c):
@@ -55,9 +68,14 @@ def normalize_cell(c):
     }
 
 
+def _day_rank(day):
+    return DAY_ORDER.index(day) if day in DAY_ORDER else len(DAY_ORDER)
+
+
 def normalized_cells(raw_cells):
     cells = [normalize_cell(c) for c in raw_cells]
-    cells.sort(key=lambda c: (DAY_ORDER.index(c['day']), c['periodIndex']))
+    # full-content tiebreak: API ordering must not affect the hash
+    cells.sort(key=lambda c: (_day_rank(c['day']), c['periodIndex'], json.dumps(c, sort_keys=True)))
     return cells
 
 
@@ -69,34 +87,74 @@ def _hm(t):
     return (t or '')[:5]
 
 
+def _show(field, value):
+    if isinstance(value, list):
+        return ', '.join(value) or 'none'
+    if field in ('start_time', 'end_time'):
+        return _hm(value) or 'none'
+    if isinstance(value, bool):
+        return 'yes' if value else 'no'
+    return value if value not in (None, '') else 'none'
+
+
+def _slot_label(c):
+    group = f" group {c['labGroup']}" if c.get('labGroup') else ''
+    return f"{c['day']} {_hm(c['start_time'])}-{_hm(c['end_time'])}{group}"
+
+
 def diff_summary(old_cells, new_cells):
-    """One plain-English line per changed slot, naming exactly which fields
-    changed (so a time/duration/lab-flag-only change is still visible, not
-    just subject/room/teacher)."""
-    def key(c):
-        return (c['day'], c['periodIndex'], c['labGroup'])
-
-    old_map, new_map = {key(c): c for c in old_cells}, {key(c): c for c in new_cells}
-    lines = []
-    for k in sorted(set(old_map) | set(new_map), key=lambda k: (DAY_ORDER.index(k[0]), k[1])):
-        o, n = old_map.get(k), new_map.get(k)
-        if o == n:
-            continue
-        day = k[0]
-        if o is None:
-            lines.append(f"{day} {_hm(n['start_time'])}-{_hm(n['end_time'])}: new class added, {n['subject']}")
-        elif n is None:
-            lines.append(f"{day} {_hm(o['start_time'])}-{_hm(o['end_time'])}: class removed, {o['subject']}")
+    """Plain-English lines for what changed. Identical cells are cancelled out
+    first, so several classes sharing one slot can't hide each other."""
+    removed, added = list(old_cells), []
+    for cell in new_cells:
+        if cell in removed:
+            removed.remove(cell)
         else:
-            subj = n['subject'] or o['subject']
-            parts = [f'{label} changed from {o[f]} to {n[f]}' for f, label in PDF_FIELDS if o[f] != n[f]]
-            lines.append(f"{day} {_hm(o['start_time'])}-{_hm(o['end_time'])} ({subj}): " + '; '.join(parts))
-    return lines
+            added.append(cell)
+
+    # pair an old and new cell in the same slot, closest match first
+    matchers = [
+        lambda o, n: o['subject'] == n['subject'] and o['labGroup'] == n['labGroup'],
+        lambda o, n: o['subject'] == n['subject'],
+        lambda o, n: o['labGroup'] == n['labGroup'],
+    ]
+    changed = []
+    for match in matchers:
+        for o in list(removed):
+            for n in added:
+                if (o['day'], o['periodIndex']) == (n['day'], n['periodIndex']) and match(o, n):
+                    changed.append((o, n))
+                    removed.remove(o)
+                    added.remove(n)
+                    break
+
+    entries = []
+    for o, n in changed:
+        parts = [f'{label} changed from {_show(f, o.get(f))} to {_show(f, n.get(f))}'
+                 for f, label in DIFF_FIELDS if o.get(f) != n.get(f)]
+        entries.append((o, f"{_slot_label(o)} ({n['subject'] or o['subject']}): " + '; '.join(parts)))
+    entries += [(o, f"{_slot_label(o)}: class removed, {o['subject']}") for o in removed]
+    entries += [(n, f"{_slot_label(n)}: new class added, {n['subject']} ({_show('room', n['room'])})")
+                for n in added]
+    entries.sort(key=lambda e: (_day_rank(e[0]['day']), e[0]['periodIndex'], e[1]))
+    return [line for _, line in entries]
 
 
-def build_message(changes):
-    return '\n'.join(['ROUTINE CHANGED', '━━━━━━━━━━━━━━━━', 'BCT 2081-AB, Semester 5', '']
-                      + changes[:30] + ['', f'📎 {PDF_SEND_NAME}'])
+def _tg_len(text):
+    return len(text.encode('utf-16-le')) // 2
+
+
+def build_message(changes, with_pdf=True):
+    """Fits Telegram's caption limit; says how many changes were left out."""
+    head = ['ROUTINE CHANGED', '━━━━━━━━━━━━━━━━', 'BCT 2081-AB, Semester 5', '']
+    tail = ['', f'📎 {PDF_SEND_NAME}'] if with_pdf else []
+    for shown in range(len(changes), -1, -1):
+        left = len(changes) - shown
+        note = [f'+ {left} more changes' + (', check the PDF' if with_pdf else '')] if left else []
+        text = '\n'.join(head + changes[:shown] + note + tail)
+        if _tg_len(text) <= CAPTION_MAX:
+            break
+    return text
 
 
 def get_initials(name):
@@ -192,29 +250,112 @@ th.period-header {{ background: #f9fafb; padding: 4px 2px; }}
     return HTML(string=html).write_pdf()
 
 
-async def send_telegram_document(http, tg_token, tg_chat_ids, caption, pdf_bytes, filename):
-    posted_any = False
-    for chat_id in tg_chat_ids:
-        try:
+async def send_telegram_alert(http, tg_token, chat_id, text, pdf_bytes):
+    """Returns (message_id, retry). retry is True only when Telegram surely
+    did not post it, so a retry can't create a duplicate."""
+    base = f'https://api.telegram.org/bot{tg_token}'
+    try:
+        if pdf_bytes:
             r = await http.post(
-                f'https://api.telegram.org/bot{tg_token}/sendDocument',
-                data={'chat_id': chat_id, 'caption': caption},
-                files={'document': (filename, pdf_bytes, 'application/pdf')},
+                f'{base}/sendDocument',
+                data={'chat_id': chat_id, 'caption': text},
+                files={'document': (PDF_SEND_NAME, pdf_bytes, 'application/pdf')},
                 timeout=60,
             )
-            if r.status_code == 200:
-                posted_any = True
-            else:
-                print(f'routine telegram HTTP {r.status_code}: {r.text[:200]}')
-        except Exception as e:
-            print(f'routine telegram error: {e}')
-    return posted_any
+        else:
+            r = await http.post(f'{base}/sendMessage', data={'chat_id': chat_id, 'text': text}, timeout=30)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        print(f'[ROUTINE] telegram not reached: {type(e).__name__}')
+        return None, True
+    except Exception as e:
+        print(f'[ROUTINE] telegram result unknown, not retrying: {type(e).__name__}')
+        return None, False
+    if r.status_code != 200:
+        print(f'[ROUTINE] telegram HTTP {r.status_code}: {r.text[:200]}')
+        return None, r.status_code < 500
+    try:
+        return r.json()['result']['message_id'], False
+    except Exception:
+        print('[ROUTINE] telegram sent but no message id returned')
+        return None, False
 
 
-async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None):
-    """Fetch, hash, compare vs saved baseline. Notify (Telegram + Discord,
-    like any other notice) only on an actual change. First run ever just
-    saves the baseline and returns -- never sends."""
+def webhook_id(url):
+    """Discord webhook id, without the secret token."""
+    return url.split('?')[0].rstrip('/').split('/')[-2]
+
+
+async def _save_now(state):
+    # push immediately: a redeploy inside the debounce window would resend
+    store.save_routine_state(state)
+    await asyncio.to_thread(store.flush_gist_backup)
+
+
+async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
+                          send_discord_text_file, webhooks):
+    """Send each alert to the destinations still waiting for it, recording
+    message ids in the same format manual notices use."""
+    pending = [a for a in state.get('alerts', []) if a.get('waiting')]
+    if not pending:
+        return
+    try:
+        pdf_bytes = await asyncio.to_thread(generate_pdf, raw_cells)
+    except Exception as e:
+        print(f'[ROUTINE] PDF failed, sending text only: {e}')
+        pdf_bytes = None
+    hooks = {webhook_id(w): w for w in webhooks if w}
+
+    for alert in pending:
+        alert['attempts'] = alert.get('attempts', 0) + 1
+        text = build_message(alert['changes'], with_pdf=bool(pdf_bytes))
+        waiting, published = alert['waiting'], alert['published']
+
+        for chat_id in list(waiting.get('telegram', [])):
+            if not tg_token or chat_id not in [str(c) for c in tg_chat_ids]:
+                waiting['telegram'].remove(chat_id)
+                continue
+            mid, retry = await send_telegram_alert(http, tg_token, chat_id, text, pdf_bytes)
+            if mid:
+                published['telegram'].append({'chat_id': chat_id, 'message_ids': [mid]})
+            if not retry:
+                waiting['telegram'].remove(chat_id)
+            await _save_now(state)
+
+        for hook in list(waiting.get('discord', [])):
+            if not send_discord_text_file or hook not in hooks:
+                waiting['discord'].remove(hook)
+                continue
+            unsure = []
+            try:
+                refs = await send_discord_text_file(
+                    text, file_bytes=pdf_bytes,
+                    filename=PDF_SEND_NAME if pdf_bytes else None,
+                    only_webhooks=[hooks[hook]], unsure=unsure,
+                )
+            except Exception as e:
+                print(f'[ROUTINE] discord result unknown, not retrying: {type(e).__name__}')
+                refs, unsure = [], [hook]
+            published['discord'] += refs
+            if refs or unsure:
+                waiting['discord'].remove(hook)
+            await _save_now(state)
+
+        left = len(waiting.get('telegram', [])) + len(waiting.get('discord', []))
+        if not left:
+            alert.pop('waiting')
+        elif alert['attempts'] >= MAX_ATTEMPTS:
+            print(f'[ROUTINE] giving up on {left} destination(s) after {MAX_ATTEMPTS} tries')
+            alert.pop('waiting')
+        else:
+            print(f'[ROUTINE] {left} destination(s) failed, will retry next check')
+        print(f"[ROUTINE] delivered: telegram={len(published['telegram'])} "
+              f"discord={len(published['discord'])}")
+        await _save_now(state)
+
+
+async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None, webhooks=()):
+    """Fetch, compare with the saved baseline, and alert on an actual change.
+    The first run only saves the baseline."""
     raw_cells = await fetch_routine(http)
     cells = normalized_cells(raw_cells)
     h = content_hash(cells)
@@ -227,34 +368,28 @@ async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=N
 
     if state.get('hash') == h:
         print(f'[ROUTINE] no change, {len(cells)} cells.')
-        return
-
-    changes = diff_summary(state.get('cells') or [], cells)
-    if not changes:
-        # hash differed but no actual cell content differs (e.g. hashing
-        # logic changed between deploys) -- nothing real to report, skip.
-        print('[ROUTINE] hash differs but no visible cell change, skip send')
-        store.save_routine_state({'hash': h, 'cells': cells})
-        return
-
-    print(f'[ROUTINE] CHANGE DETECTED: {len(changes)} slot(s) differ')
-    for line in changes:
-        print(' ', line)
-
-    pdf_bytes = generate_pdf(raw_cells)
-    text = build_message(changes)
-
-    if tg_token and tg_chat_ids:
-        tg_ok = await send_telegram_document(http, tg_token, tg_chat_ids, text, pdf_bytes, PDF_SEND_NAME)
-        print(f'[ROUTINE] telegram send {"ok" if tg_ok else "FAILED"}')
     else:
-        print('[ROUTINE] no Telegram token/chat configured, skipping send')
+        changes = diff_summary(state.get('cells') or [], cells)
+        state.update(hash=h, cells=cells)
+        if changes:
+            print(f'[ROUTINE] CHANGE DETECTED: {len(changes)} change(s)')
+            for line in changes:
+                print(' ', line)
+            alerts = state.get('alerts', []) + [{
+                'detected_at': datetime.now(timezone.utc).isoformat(),
+                'changes': changes,
+                'waiting': {
+                    'telegram': [str(c) for c in tg_chat_ids] if tg_token else [],
+                    'discord': [webhook_id(w) for w in webhooks if w] if send_discord_text_file else [],
+                },
+                'published': {'telegram': [], 'discord': []},
+            }]
+            old = [a for a in alerts if not a.get('waiting')][:-KEEP_ALERTS]
+            state['alerts'] = [a for a in alerts if a not in old]
+        else:
+            print('[ROUTINE] hash differs but no visible change, skip send')
+        # queued before sending, so a failed send is retried instead of lost
+        await _save_now(state)
 
-    if send_discord_text_file:
-        try:
-            disc_refs = await send_discord_text_file(text, file_bytes=pdf_bytes, filename=PDF_SEND_NAME)
-            print(f'[ROUTINE] discord send {"ok" if disc_refs else "FAILED"}')
-        except Exception as e:
-            print(f'[ROUTINE] discord error: {e}')
-
-    store.save_routine_state({'hash': h, 'cells': cells})
+    await deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
+                          send_discord_text_file, webhooks)
