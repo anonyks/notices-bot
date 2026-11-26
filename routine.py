@@ -53,30 +53,35 @@ CAPTION_MAX = 1024  # Telegram document caption limit
 MAX_ATTEMPTS = 144  # about a day of retries at one per 10 min
 FETCH_TIMEOUT = 30  # the campus and TU sites are sometimes slow
 FETCH_RETRY_WAIT = 5
+# the routine site is slower and flakier: wait longer and try three times
+ROUTINE_TIMEOUT = 60
+ROUTINE_RETRY_WAITS = (5, 20)
 KEEP_ALERTS = 20  # finished alerts kept for their message ids
 
 
-async def get_with_retry(client, url, **kwargs):
-    """GET for the scrapers: one retry after a timeout, connection error or 5xx,
-    so a brief blip doesn't raise an operator alert."""
-    for attempt in (1, 2):
+async def get_with_retry(client, url, timeout=FETCH_TIMEOUT, waits=(FETCH_RETRY_WAIT,), **kwargs):
+    """GET for the scrapers. Retries once per entry in waits after a timeout,
+    connection error or 5xx, so a brief blip doesn't raise an operator alert."""
+    for attempt in range(len(waits) + 1):
+        last = attempt == len(waits)
         try:
-            r = await client.get(url, timeout=FETCH_TIMEOUT, **kwargs)
+            r = await client.get(url, timeout=timeout, **kwargs)
         except httpx.TransportError as e:
-            if attempt == 2:
+            if last:
                 raise
             reason = type(e).__name__
         else:
-            if r.status_code < 500 or attempt == 2:
+            if r.status_code < 500 or last:
                 r.raise_for_status()
                 return r
             reason = f'HTTP {r.status_code}'
-        print(f"fetch {url.split('/')[2]}: {reason}, retrying in {FETCH_RETRY_WAIT}s")
-        await asyncio.sleep(FETCH_RETRY_WAIT)
+        print(f"fetch {url.split('/')[2]}: {reason}, retry {attempt + 1}/{len(waits)} in {waits[attempt]}s")
+        await asyncio.sleep(waits[attempt])
 
 
 async def fetch_routine(http):
-    r = await get_with_retry(http, ROUTINE_URL, params=ROUTINE_PARAMS, headers=ROUTINE_HEADERS)
+    r = await get_with_retry(http, ROUTINE_URL, timeout=ROUTINE_TIMEOUT, waits=ROUTINE_RETRY_WAITS,
+                             params=ROUTINE_PARAMS, headers=ROUTINE_HEADERS)
     cells = r.json().get('cells')
     if not cells:
         # never treat an empty or malformed reply as "every class removed"
@@ -88,8 +93,8 @@ async def fetch_signatories(http):
     """(label, name, position) rows for the PDF. Empty on any failure, so a
     signature problem never holds back an alert."""
     try:
-        r = await http.get(SIGNATURE_URL, params=SIGNATURE_PARAMS, headers=ROUTINE_HEADERS, timeout=20)
-        r.raise_for_status()
+        r = await get_with_retry(http, SIGNATURE_URL, timeout=ROUTINE_TIMEOUT, waits=ROUTINE_RETRY_WAITS,
+                                 params=SIGNATURE_PARAMS, headers=ROUTINE_HEADERS)
         rows = sorted(r.json().get('results') or [], key=lambda x: x.get('order') or 0)
         found = []
         for job, label in SIGNATURE_ROLES:
