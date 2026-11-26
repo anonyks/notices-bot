@@ -194,7 +194,8 @@ def diff_summary(old_cells, new_cells):
             where = f'{subject}, {len(slots)} classes ({days})'
         entries.append((slots[0], f'{where}: {what}'))
     entries += [(o, f"{_slot_label(o)}: class removed, {o['subject']}") for o in removed]
-    entries += [(n, f"{_slot_label(n)}: new class added, {n['subject']} ({_show('room', n['room'])})")
+    entries += [(n, f"{_slot_label(n)}: new class added, {n['subject']} "
+                    f"({_show('room', n['room'])}, teacher: {_show('teachers', n['teachers'])})")
                 for n in added]
     entries.sort(key=lambda e: (_day_rank(e[0]['day']), e[0]['periodIndex'], e[1]))
     return [line for _, line in entries]

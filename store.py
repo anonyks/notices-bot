@@ -203,6 +203,21 @@ def append_scraped(notice):
     _save(path, rows)
 
 
+def load_scraped():
+    return _load(scraped_path())
+
+
+def update_scraped(notice):
+    """Replace the saved record for this link, re-reading so nothing else is lost."""
+    path = scraped_path()
+    rows = _load(path)
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i].get('link') == notice.get('link'):
+            rows[i] = notice
+            _save(path, rows)
+            return
+
+
 def load_posted():
     try:
         return posted_path().read_text(encoding='utf-8').splitlines()

@@ -527,70 +527,91 @@ async def _discord_post(url, *, json=None, data=None, files=None, timeout=30, tr
         return last
 
 
-async def send_discord(title, url, medias):
-    """Send to Discord webhooks. Returns True if at least one post succeeded."""
-    posted_any = False
-    for w in [w1, w2]:
-        if not w:
+# errors raised before the request reached the server, so a retry can't duplicate
+NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ProxyError)
+
+
+def _outcome(status_code):
+    if status_code in (200, 201, 204):
+        return 'sent'
+    return 'retry' if status_code < 500 else 'unsure'
+
+
+def _error_outcome(e):
+    return 'retry' if isinstance(e, NOT_SENT_ERRORS) else 'unsure'
+
+
+def _combine(results):
+    """Anything delivered or possibly delivered must not be sent again."""
+    for state in ('sent', 'unsure'):
+        if state in results:
+            return state
+    return 'retry'
+
+
+async def _download_media(url, timeout):
+    try:
+        r = await http.get(url, headers={'User-Agent': UA}, timeout=timeout)
+        if r.status_code == 200:
+            return r.content
+        print(f'media download HTTP {r.status_code}: {url}')
+    except Exception as e:
+        print(f'media download error: {exc_str(e)}')
+    return None
+
+
+def _media_name(item):
+    return item['url'].split('/')[-1].split('?')[0] or (
+        'image.png' if item['kind'] == 'image' else 'file.pdf'
+    )
+
+
+async def send_discord(webhook, msg, files):
+    """Send one scraped notice to one webhook: 'sent', 'retry' or 'unsure'."""
+    results = []
+    text = msg[:1900]
+
+    async def post(**kwargs):
+        try:
+            r = await _discord_post(webhook, **kwargs)
+        except Exception as e:
+            print(f'discord error: {type(e).__name__}')
+            return _error_outcome(e), None
+        if _outcome(r.status_code) != 'sent':
+            print(f'discord HTTP {r.status_code}: {r.text[:200]}')
+        return _outcome(r.status_code), r.status_code
+
+    for item in files[:10]:
+        data = await _download_media(item['url'], 60)
+        if data is None:
+            results.append('retry')
             continue
         try:
-            msg = discord_escape(format_from_site(title, url))
-            files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
-
-            if files:
-                for item in files[:10]:
-                    try:
-                        pr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=60)
-                        if pr.status_code != 200:
-                            continue
-                        fn = item['url'].split('/')[-1].split('?')[0] or (
-                            'image.png' if item['kind'] == 'image' else 'file.pdf'
-                        )
-                        body, fn, _ = fit_discord_attachment(pr.content, fn)
-                        if len(body) > DISCORD_SOFT_MAX + 512 * 1024:
-                            # still hopeless (>~9.5MB) — text + link only for this file
-                            print(f'discord: skip fat file {fn} ({len(body)/1024/1024:.1f}MB), link-only')
-                            if msg:
-                                r = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
-                                if r.status_code in (200, 201, 204):
-                                    print('discord: sent (link only)')
-                                    posted_any = True
-                                    msg = ''
-                            continue
-                        r = await _discord_post(
-                            w,
-                            data={'content': msg[:1900]},
-                            files={'file': (fn, body)},
-                            timeout=60,
-                        )
-                        if r.status_code in (200, 201, 204):
-                            print(f'discord: {fn}')
-                            posted_any = True
-                            msg = ''
-                        elif r.status_code == 413:
-                            # last resort: drop attachment, keep notice text+link
-                            print(f'discord 413 on {fn} — posting link only')
-                            r2 = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
-                            if r2.status_code in (200, 201, 204):
-                                print('discord: sent (link only after 413)')
-                                posted_any = True
-                                msg = ''
-                            else:
-                                print(f'discord HTTP {r2.status_code}: {r2.text[:200]}')
-                        else:
-                            print(f'discord HTTP {r.status_code}: {r.text[:200]}')
-                    except Exception as e:
-                        print(f'discord file error: {e}')
-            else:
-                r = await _discord_post(w, json={'content': msg[:1900]}, timeout=10)
-                if r.status_code in (200, 201, 204):
-                    print('discord: sent')
-                    posted_any = True
-                else:
-                    print(f'discord HTTP {r.status_code}: {r.text[:200]}')
+            body, fn, _ = fit_discord_attachment(data, _media_name(item))
         except Exception as e:
-            print(f'discord error: {e}')
-    return posted_any
+            print(f'discord file error: {e}')
+            results.append('retry')
+            continue
+        if len(body) > DISCORD_SOFT_MAX + 512 * 1024:
+            # still hopeless (>~9.5MB), send text + link only for this file
+            print(f'discord: skip fat file {fn} ({len(body)/1024/1024:.1f}MB), link-only')
+            state = 'skip'
+            if text:
+                state, _ = await post(json={'content': text}, timeout=10)
+        else:
+            state, status = await post(data={'content': text}, files={'file': (fn, body)}, timeout=60)
+            if status == 413:
+                print(f'discord 413 on {fn}, posting link only')
+                state = 'skip'
+                if text:
+                    state, _ = await post(json={'content': text}, timeout=10)
+        results.append(state)
+        if state == 'sent':
+            text = ''
+    if not files:
+        state, _ = await post(json={'content': text}, timeout=10)
+        results.append(state)
+    return _combine(results)
 
 
 async def send_discord_text_file(caption, file_bytes=None, filename=None, reply_to_refs=None,
@@ -735,67 +756,128 @@ TELEGRAM_UPLOAD_MAX = 50 * 1024 * 1024  # bot API upload cap
 TELEGRAM_PHOTO_MAX = 10 * 1024 * 1024  # sendPhoto's own (lower) cap
 
 
-async def send_telegram(title, url, medias):
-    """Send to Telegram chats. Returns True if at least one send succeeded."""
-    posted_any = False
-    if not tg_token:
-        return False
-    try:
-        msg = format_from_site(title, url)
-        files = _attachments_from_medias(medias) if medias else await get_notice_attachments(url)
+async def send_telegram(chat_id, msg, files):
+    """Send one scraped notice to one chat: 'sent', 'retry' or 'unsure'."""
+    results = []
+    caption = msg
 
-        for chat_id in tg_chat_ids:
-            if files:
-                local_msg = msg
-                for item in files[:3]:
-                    try:
-                        # Telegram fetching the source URL server-side is unreliable
-                        # (cloudflare-protected origins, missing headers, etc) - download
-                        # the bytes ourselves and upload them directly instead.
-                        fr = await http.get(item['url'], headers={'User-Agent': UA}, timeout=30)
-                        if fr.status_code != 200:
-                            print(f'telegram media download HTTP {fr.status_code}: {item["url"]}')
-                            continue
-                        body = fr.content
-                        if len(body) > TELEGRAM_UPLOAD_MAX:
-                            print(f'telegram: skip fat file ({len(body)/1024/1024:.1f}MB)')
-                            continue
-                        fn = item['url'].split('/')[-1].split('?')[0] or (
-                            'image.png' if item['kind'] == 'image' else 'file.pdf'
-                        )
-                        # sendPhoto rejects anything over 10MB; fall back to
-                        # sendDocument so oversized scans still get delivered.
-                        is_photo = item['kind'] == 'image' and len(body) <= TELEGRAM_PHOTO_MAX
-                        field = 'photo' if is_photo else 'document'
-                        endpoint = 'sendPhoto' if is_photo else 'sendDocument'
-                        r = await http.post(
-                            f'https://api.telegram.org/bot{tg_token}/{endpoint}',
-                            data={'chat_id': chat_id, 'caption': local_msg},
-                            files={field: (fn, body)},
-                            timeout=60,
-                        )
-                        if r.status_code == 200:
-                            print('telegram: sent')
-                            posted_any = True
-                            local_msg = ''
-                        else:
-                            print(f'telegram media HTTP {r.status_code}: {r.text[:200]}')
-                    except Exception as e:
-                        print(f'telegram media error: {e}')
-            else:
-                r = await http.post(
-                    f'https://api.telegram.org/bot{tg_token}/sendMessage',
-                    data={'chat_id': chat_id, 'text': msg},
-                    timeout=10,
-                )
-                if r.status_code == 200:
-                    print('telegram: sent')
-                    posted_any = True
-                else:
-                    print(f'telegram HTTP {r.status_code}: {r.text[:200]}')
-    except Exception as e:
-        print(f'telegram error: {e}')
-    return posted_any
+    async def post(endpoint, **kwargs):
+        try:
+            r = await http.post(f'https://api.telegram.org/bot{tg_token}/{endpoint}', **kwargs)
+        except Exception as e:
+            print(f'telegram error: {type(e).__name__}')
+            return _error_outcome(e)
+        if _outcome(r.status_code) != 'sent':
+            print(f'telegram HTTP {r.status_code}: {r.text[:200]}')
+        return _outcome(r.status_code)
+
+    for item in files[:3]:
+        # Telegram fetching the source URL server-side is unreliable
+        # (cloudflare-protected origins, missing headers, etc) - download
+        # the bytes ourselves and upload them directly instead.
+        body = await _download_media(item['url'], 30)
+        if body is None:
+            results.append('retry')
+            continue
+        if len(body) > TELEGRAM_UPLOAD_MAX:
+            print(f'telegram: skip fat file ({len(body)/1024/1024:.1f}MB)')
+            continue
+        # sendPhoto rejects anything over 10MB; fall back to
+        # sendDocument so oversized scans still get delivered.
+        is_photo = item['kind'] == 'image' and len(body) <= TELEGRAM_PHOTO_MAX
+        state = await post(
+            'sendPhoto' if is_photo else 'sendDocument',
+            data={'chat_id': chat_id, 'caption': caption},
+            files={'photo' if is_photo else 'document': (_media_name(item), body)},
+            timeout=60,
+        )
+        results.append(state)
+        if state == 'sent':
+            caption = ''
+    if not results:
+        # no files, or every file was too big to upload
+        results.append(await post('sendMessage', data={'chat_id': chat_id, 'text': msg}, timeout=10))
+    return _combine(results)
+
+
+NOTICE_MAX_TRIES = 144  # about a day at one try per 10 minutes
+NOTICE_TEXT_ONLY_AFTER = 3  # then stop waiting on attachments and send text + link
+
+
+def queue_notice(n):
+    """Record a new notice with every destination still waiting for it."""
+    store.append_scraped({
+        'category': 'from_site',
+        'title': n['title'],
+        'link': n['link'],
+        'posted_at': datetime.now(timezone.utc).isoformat(),
+        'medias': n.get('medias'),
+        'attempts': 0,
+        'waiting': {
+            'telegram': [str(c) for c in tg_chat_ids] if tg_token else [],
+            'discord': [routine.webhook_id(w) for w in (w1, w2) if w],
+        },
+    })
+
+
+async def _save_delivery(record):
+    # push right away so a redeploy doesn't resend what already arrived
+    store.update_scraped(record)
+    await asyncio.to_thread(store.flush_gist_backup)
+
+
+async def _deliver_notice(record):
+    title, link = record.get('title'), record['link']
+    record['attempts'] = record.get('attempts', 0) + 1
+    waiting = record['waiting']
+    files = []
+    if record['attempts'] <= NOTICE_TEXT_ONLY_AFTER:
+        medias = record.get('medias')
+        files = _attachments_from_medias(medias) if medias else await get_notice_attachments(link)
+    msg = format_from_site(title, link)
+    hooks = {routine.webhook_id(w): w for w in (w1, w2) if w}
+    chats = [str(c) for c in tg_chat_ids]
+    targets = [('discord', d) for d in list(waiting.get('discord', []))]
+    targets += [('telegram', c) for c in list(waiting.get('telegram', []))]
+
+    for kind, dest in targets:
+        if kind == 'discord':
+            if dest not in hooks:
+                waiting[kind].remove(dest)
+                continue
+            label = f'discord {list(hooks).index(dest) + 1}'
+            state = await send_discord(hooks[dest], discord_escape(msg), files)
+        else:
+            if dest not in chats:
+                waiting[kind].remove(dest)
+                continue
+            label = f'telegram {chats.index(dest) + 1}'
+            state = await send_telegram(dest, msg, files)
+        print(f'[MONITOR] {label}: {state} (try {record["attempts"]})')
+        if state != 'retry':
+            waiting[kind].remove(dest)
+        await _save_delivery(record)
+
+    left = len(waiting.get('telegram', [])) + len(waiting.get('discord', []))
+    if left and record['attempts'] < NOTICE_MAX_TRIES:
+        print(f'[MONITOR] {left} destination(s) will retry: {title}')
+    else:
+        for key in ('waiting', 'attempts', 'medias'):
+            record.pop(key, None)
+        if left:
+            print(f'[MONITOR] giving up on {left} destination(s): {title}')
+            await notify_ops(f'Notice not delivered to {left} destination(s) after a day:\n{title}\n{link}')
+    await _save_delivery(record)
+
+
+async def deliver_notices():
+    """Send queued notices, retrying only the destinations that failed. Older
+    history has no 'waiting' entry, so it is never resent."""
+    for record in [r for r in store.load_scraped() if r.get('waiting')]:
+        try:
+            await _deliver_notice(record)
+        except Exception as e:
+            print(f'[MONITOR] delivery error: {exc_str(e)}')
 
 
 async def poll():
@@ -1031,19 +1113,10 @@ async def run():
             for n in exam + tcioe:
                 if n['link'] not in posted:
                     print(f"[MONITOR] NEW: {n['title']}")
-                    discord_ok = await send_discord(n['title'], n['link'], n.get('medias'))
-                    telegram_ok = await send_telegram(n['title'], n['link'], n.get('medias'))
-                    if not (discord_ok or telegram_ok):
-                        print('[MONITOR] both sends failed — not saving posted marker')
-                        continue
-                    store.append_scraped({
-                        'category': 'from_site',
-                        'title': n['title'],
-                        'link': n['link'],
-                        'posted_at': datetime.now(timezone.utc).isoformat(),
-                    })
+                    queue_notice(n)
                     save(n['link'])
                     posted.append(n['link'])
+            await deliver_notices()
             await asyncio.sleep(CHECK_EVERY)
         except Exception as e:
             print(f'[MONITOR] error: {e}')
