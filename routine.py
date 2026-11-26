@@ -4,6 +4,7 @@
 # actually changed. State persists via store.py so it survives Render redeploys.
 import asyncio
 import hashlib
+import html as html_lib
 import json
 from datetime import datetime, timezone
 
@@ -32,6 +33,14 @@ PERIODS = [
     ('IV', '11:30 - 12:15'), ('V', '12:15 - 13:00'), ('VI', '13:00 - 13:45'),
     ('VII', '13:45 - 14:30'), ('VIII', '14:30 - 15:15'), ('IX', '15:15 - 16:00'),
 ]
+SIGNATURE_URL = 'https://routine.tcioe.edu.np/api/signature'
+SIGNATURE_PARAMS = {'department': 'DOECE', 'job_type': 'routine', 'faculty': 'BCT'}
+SIGNATURE_ROLES = [
+    ('Prepared_Routine', 'Prepared By:'), ('Checked_Routine', 'Checked By:'),
+    ('Verified_Routine', 'Verified By:'), ('Approved_Routine', 'Approved By:'),
+]
+BS_MONTHS = ['Baisakh', 'Jestha', 'Ashadh', 'Shrawan', 'Bhadra', 'Ashwin',
+             'Kartik', 'Mangsir', 'Poush', 'Magh', 'Falgun', 'Chaitra']
 PDF_SEND_NAME = 'BCT_2081-AB_sem5_routine.pdf'
 # every field normalize_cell keeps (except the slot itself) must be listed here
 DIFF_FIELDS = [
@@ -53,6 +62,48 @@ async def fetch_routine(http):
         # never treat an empty or malformed reply as "every class removed"
         raise ValueError('routine API returned no cells')
     return cells
+
+
+async def fetch_signatories(http):
+    """(label, name, position) rows for the PDF. Empty on any failure, so a
+    signature problem never holds back an alert."""
+    try:
+        r = await http.get(SIGNATURE_URL, params=SIGNATURE_PARAMS, headers=ROUTINE_HEADERS, timeout=20)
+        r.raise_for_status()
+        rows = sorted(r.json().get('results') or [], key=lambda x: x.get('order') or 0)
+        found = []
+        for job, label in SIGNATURE_ROLES:
+            person = next((x for x in rows if x.get('job') == job), None)
+            if person:
+                found.append((label, person.get('name') or '', person.get('position') or ''))
+        return found
+    except Exception as e:
+        print(f'[ROUTINE] signatories unavailable: {type(e).__name__}')
+        return []
+
+
+def year_part(semester):
+    """'sem5' -> ('Third', 'First', 'III/I'), or None."""
+    try:
+        n = int(str(semester).replace('sem', '')) - 1
+        if n < 0:
+            return None
+        year, part = n // 2, n % 2
+        return (['First', 'Second', 'Third', 'Fourth', 'Fifth'][year], ['First', 'Second'][part],
+                f"{['I', 'II', 'III', 'IV', 'V'][year]}/{['I', 'II'][part]}")
+    except (ValueError, IndexError):
+        return None
+
+
+def bs_date_label(value):
+    """'2083-08-01' -> 'Mangsir 1, 2083'. The API date is already Nepali (BS)."""
+    try:
+        y, m, d = (int(x) for x in value.split('-'))
+        if not 1 <= m <= 12:
+            return ''
+        return f'{BS_MONTHS[m - 1]} {d}, {y}'
+    except (AttributeError, ValueError):
+        return ''
 
 
 def normalize_cell(c):
@@ -170,8 +221,20 @@ def get_initials(name):
     return ''.join(p[0].upper() for p in name.replace('Dr.', '').strip().split() if p)
 
 
-def generate_pdf(raw_cells):
+def generate_pdf(raw_cells, signatories=()):
     """Static HTML -> PDF via weasyprint, straight from the JSON. No browser."""
+    academic = next((c['academic_class'] for c in raw_cells if c.get('academic_class')), {})
+    parts = year_part(academic.get('semester') or ROUTINE_PARAMS['semester'])
+    title_part = f', {parts[0]} Year {parts[1]} Part' if parts else ''
+    year_line = f'Year/Part: <strong>{parts[0]} Year / {parts[1]} Part [{parts[2]}]</strong>' if parts else ''
+    effective = bs_date_label(academic.get('effective_from'))
+    effective_line = f'Effective From: <strong>{effective}</strong>' if effective else ''
+    signature_cells = ''.join(
+        f'<div class="sign"><div class="sign-role">{label}</div>'
+        f'<div class="sign-role">{html_lib.escape(name)}</div><div>{html_lib.escape(position)}</div></div>'
+        for label, name, position in signatories
+    )
+    signature_block = f'<div class="signatures">{signature_cells}</div>' if signature_cells else ''
     days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
     legend = {}
     for c in raw_cells:
@@ -182,7 +245,7 @@ def generate_pdf(raw_cells):
     legend_str = ' &bull; '.join(sorted(legend.values()))
 
     head_cells = ''.join(
-        f'<th class="period-header"><div class="period-num">{n}</div><div class="period-time">{t}</div></th>'
+        f'<th class="period-header"><div class="period-num">{n}</div><div class="period-time">{t.replace(' ', '')}</div></th>'
         for n, t in PERIODS
     )
     body_rows = ''
@@ -197,8 +260,8 @@ def generate_pdf(raw_cells):
                     cards = ''
                     for c in matching:
                         room = (c.get('room') or {}).get('name') or f"Room {(c.get('room') or {}).get('room_no', '')}"
-                        grp = f"Group {c['labGroup']} | " if c.get('labGroup') else ''
-                        inits = ' + '.join(get_initials(t['name']) for t in c.get('teachers', []))
+                        grp = f"{c['labGroup']} | " if c.get('labGroup') else ''
+                        inits = ', '.join(get_initials(t['name']) for t in c.get('teachers', []))
                         cards += (f'<div class="concurrent-card"><div class="subj-name">{(c.get("subject") or {}).get("name", "")}</div>'
                                   f'<div class="subj-meta">{room} | <span class="badge-group">{grp}</span>{inits} <span class="badge-l">L</span></div></div>')
                     row += f'<td colspan="{span}" style="background:#f9fafb;padding:2px;height:52px;"><div class="concurrent-container">{cards}</div></td>'
@@ -206,7 +269,7 @@ def generate_pdf(raw_cells):
                     c = matching[0]
                     room = (c.get('room') or {}).get('name') or f"Room {(c.get('room') or {}).get('room_no', '')}"
                     badge = '<span class="badge-l">L</span>' if c.get('course_type') == 'PR' else ''
-                    inits = ' + '.join(get_initials(t['name']) for t in c.get('teachers', []))
+                    inits = ', '.join(get_initials(t['name']) for t in c.get('teachers', []))
                     grp = f'<span class="badge-group">Group {c["labGroup"]}</span> | ' if c.get('labGroup') else ''
                     row += (f'<td colspan="{span}" style="padding:2px;height:52px;"><div class="single-cell">'
                             f'<div class="subj-name">{(c.get("subject") or {}).get("name", "")}</div>'
@@ -243,17 +306,23 @@ th.period-header {{ background: #f9fafb; padding: 4px 2px; }}
 .concurrent-container {{ display: flex; flex-direction: column; gap: 3px; height: 100%; padding: 2.5px; }}
 .concurrent-card {{ border: 1.5px solid #e5e7eb; border-radius: 4px; padding: 3px; display: flex; flex-direction: column; justify-content: center; flex: 1; }}
 .legend-box {{ margin-top: 8px; border: 1px solid #e5e7eb; border-radius: 5px; background: #f9fafb; padding: 5px 8px; font-size: 7.5pt; color: #374151; }}
+.meta {{ display: flex; justify-content: space-between; font-size: 9pt; margin-top: 8px; }}
+.signatures {{ display: flex; gap: 8px; margin-top: 30px; }}
+.sign {{ flex: 1; border-top: 1px solid #111827; padding-top: 3px; text-align: center; font-size: 8pt; font-style: italic; }}
+.sign-role {{ font-weight: 700; }}
 </style></head><body>
 <div class="official-header">
   <div class="title-tu">Tribhuvan University</div>
   <div class="title-sub">Institute of Engineering</div>
   <div class="title-sub">Thapathali Campus</div>
   <div class="title-dept">Department of Electronics and Computer Engineering</div>
-  <div class="title-routine">Class Routine [Bachelor of Computer Engineering, Third Year First Part (AB)]</div>
+  <div class="title-routine">Class Routine [Bachelor of Computer Engineering{title_part} ({ROUTINE_PARAMS['section']})]</div>
 </div>
+<div class="meta"><div>{year_line}</div><div>{effective_line}</div></div>
 <table><thead><tr><th class="day-header">Day/Period</th>{head_cells}</tr></thead>
 <tbody>{body_rows}</tbody></table>
-<div class="legend-box"><strong>Teachers: </strong>{legend_str}</div>
+<div class="legend-box">{legend_str}</div>
+{signature_block}
 </body></html>"""
 
     return HTML(string=html).write_pdf()
@@ -308,7 +377,8 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
     if not pending:
         return
     try:
-        pdf_bytes = await asyncio.to_thread(generate_pdf, raw_cells)
+        signatories = await fetch_signatories(http)
+        pdf_bytes = await asyncio.to_thread(generate_pdf, raw_cells, signatories)
     except Exception as e:
         print(f'[ROUTINE] PDF failed, sending text only: {e}')
         pdf_bytes = None
