@@ -362,9 +362,11 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
         await _save_now(state)
 
 
-async def run_test(http, tg_token, chat_id, webhooks=()):
-    """Manual /routinetest. Sends the PDF alert to the asking Telegram chat only.
-    Discord webhooks are only read (GET), never posted to. Saved state is untouched."""
+async def run_test(http, tg_token, chat_id, webhooks=(), post_discord=None):
+    """Manual /routinetest. Sends the PDF alert to the asking Telegram chat.
+    Discord webhooks are only read (GET) unless post_discord is given
+    (/routinetest discord), which posts one public test to each webhook.
+    Saved state is untouched."""
     raw_cells = await fetch_routine(http)
     cells = normalized_cells(raw_cells)
     # replays the real teacher rename; falls back if that teacher is gone
@@ -384,6 +386,19 @@ async def run_test(http, tg_token, chat_id, webhooks=()):
               f'PDF: ok, {len(pdf_bytes) // 1024} KB',
               f'Telegram: sent, message id {message_id}' if message_id else 'Telegram: not confirmed, check logs']
     for n, url in enumerate((w for w in webhooks if w), 1):
+        if post_discord:
+            unsure = []
+            try:
+                refs = await post_discord(text, file_bytes=pdf_bytes, filename=PDF_SEND_NAME,
+                                          only_webhooks=[url], unsure=unsure)
+            except Exception as e:
+                refs, unsure = [], [type(e).__name__]
+            if refs:
+                report.append(f"Discord webhook {n}: posted, message id {refs[0]['message_id']}")
+            else:
+                state = 'may have posted, check the channel' if unsure else 'failed, check logs'
+                report.append(f'Discord webhook {n}: {state}')
+            continue
         try:
             r = await http.get(url.split('?')[0], timeout=15)
             status = 'reachable' if r.status_code == 200 else f'HTTP {r.status_code}'

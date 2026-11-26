@@ -1396,9 +1396,11 @@ class TgMenu:
         if txt.startswith('/status'):
             await self.cmd_status(chat_id, trigger_mid=msg.get('message_id'))
             return
-        if txt == '/routinetest':
+        if txt in ('/routinetest', '/routinetest discord'):
             try:
-                report = await routine.run_test(self.http, self.token, chat_id, self.webhooks)
+                report = await routine.run_test(
+                    self.http, self.token, chat_id, self.webhooks,
+                    self.send_discord_text_file if txt.endswith(' discord') else None)
             except Exception as e:
                 # type only: exception text can contain token-bearing URLs
                 report = f'Routine test failed: {type(e).__name__}'
