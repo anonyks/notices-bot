@@ -245,7 +245,7 @@ def generate_pdf(raw_cells, signatories=()):
     legend_str = ' &bull; '.join(sorted(legend.values()))
 
     head_cells = ''.join(
-        f'<th class="period-header"><div class="period-num">{n}</div><div class="period-time">{t.replace(' ', '')}</div></th>'
+        f'<th class="period-header"><div class="period-num">{n}</div><div class="period-time">{t.replace(" ", "")}</div></th>'
         for n, t in PERIODS
     )
     body_rows = ''
