@@ -362,52 +362,6 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
         await _save_now(state)
 
 
-async def run_test(http, tg_token, chat_id, webhooks=(), post_discord=None):
-    """Manual /routinetest. Sends the PDF alert to the asking Telegram chat.
-    Discord webhooks are only read (GET) unless post_discord is given
-    (/routinetest discord), which posts one public test to each webhook.
-    Saved state is untouched."""
-    raw_cells = await fetch_routine(http)
-    cells = normalized_cells(raw_cells)
-    # replays the real teacher rename; falls back if that teacher is gone
-    new_name, old_name = 'Surya Bhakta Adhikari', 'Surya Adhikari'
-    if not any(new_name in c['teachers'] for c in cells):
-        new_name, old_name = next(t for c in cells for t in c['teachers']), 'SAMPLE OLD NAME'
-    previous = [dict(c, teachers=sorted(old_name if t == new_name else t for t in c['teachers']))
-                for c in cells]
-    text = build_message(diff_summary(previous, cells))
-    text = text.replace('ROUTINE CHANGED', 'TEST - routine change tracking', 1)
-    text = text.replace('Semester 5', 'Semester 5 (sample, not real)', 1)
-    pdf_bytes = await asyncio.to_thread(generate_pdf, raw_cells)
-    message_id, _ = await send_telegram_alert(http, tg_token, chat_id, text, pdf_bytes)
-
-    report = ['Routine test result',
-              f'Fetch: ok, {len(cells)} classes',
-              f'PDF: ok, {len(pdf_bytes) // 1024} KB',
-              f'Telegram: sent, message id {message_id}' if message_id else 'Telegram: not confirmed, check logs']
-    for n, url in enumerate((w for w in webhooks if w), 1):
-        if post_discord:
-            unsure = []
-            try:
-                refs = await post_discord(text, file_bytes=pdf_bytes, filename=PDF_SEND_NAME,
-                                          only_webhooks=[url], unsure=unsure)
-            except Exception as e:
-                refs, unsure = [], [type(e).__name__]
-            if refs:
-                report.append(f"Discord webhook {n}: posted, message id {refs[0]['message_id']}")
-            else:
-                state = 'may have posted, check the channel' if unsure else 'failed, check logs'
-                report.append(f'Discord webhook {n}: {state}')
-            continue
-        try:
-            r = await http.get(url.split('?')[0], timeout=15)
-            status = 'reachable' if r.status_code == 200 else f'HTTP {r.status_code}'
-        except Exception as e:
-            status = type(e).__name__
-        report.append(f'Discord webhook {n}: {status} (read only, nothing posted)')
-    return '\n'.join(report)
-
-
 async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None, webhooks=()):
     """Fetch, compare with the saved baseline, and alert on an actual change.
     The first run only saves the baseline."""
