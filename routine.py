@@ -163,15 +163,15 @@ body {{ font-family: Arial, sans-serif; color: #111827; margin: 0; }}
 .title-routine {{ font-size: 10.5pt; font-weight: 800; margin-top: 4px; }}
 table {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 4px; }}
 th, td {{ border: 1px solid #d1d5db; text-align: center; vertical-align: middle; }}
-th.day-header, td.day-cell {{ width: 75px; background: #f9fafb; font-weight: 700; font-size: 9pt; }}
+th.day-header, td.day-cell {{ width: 75px; background: #f9fafb; font-weight: 700; font-size: 8pt; }}
 th.period-header {{ background: #f9fafb; padding: 4px 2px; }}
-.period-num {{ font-size: 11pt; font-weight: 800; }}
-.period-time {{ font-size: 7.5pt; color: #4b5563; margin-top: 2px; }}
+.period-num {{ font-size: 10pt; font-weight: 800; }}
+.period-time {{ font-size: 7pt; color: #4b5563; margin-top: 2px; }}
 .single-cell {{ height: 100%; display: flex; flex-direction: column; justify-content: center; padding: 3px; }}
-.subj-name {{ font-size: 9.5pt; font-weight: 700; }}
-.subj-meta {{ font-size: 8.5pt; margin-top: 2px; }}
-.subj-teacher {{ font-size: 8pt; color: #4b5563; margin-top: 1.5px; }}
-.badge-l {{ background: #dbeafe; color: #1e40af; font-size: 7pt; font-weight: 700; padding: 1px 3.5px; border-radius: 3px; margin-left: 3px; }}
+.subj-name {{ font-size: 8pt; font-weight: 700; }}
+.subj-meta {{ font-size: 7.5pt; margin-top: 2px; }}
+.subj-teacher {{ font-size: 7pt; color: #4b5563; margin-top: 1.5px; }}
+.badge-l {{ background: #dbeafe; color: #1e40af; font-size: 6.5pt; font-weight: 700; padding: 1px 3.5px; border-radius: 3px; margin-left: 3px; }}
 .badge-group {{ font-weight: 600; color: #374151; }}
 .concurrent-container {{ display: flex; flex-direction: column; gap: 3px; height: 100%; padding: 2.5px; }}
 .concurrent-card {{ border: 1.5px solid #e5e7eb; border-radius: 4px; padding: 3px; display: flex; flex-direction: column; justify-content: center; flex: 1; }}
