@@ -6,7 +6,7 @@ import asyncio
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from urllib.parse import urlparse, parse_qs
 
@@ -33,8 +33,8 @@ from tg_bot import (
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
 # check every 10 min (was 5) so we use less Render bandwidth
 CHECK_EVERY = 600
-# routine changes rarely, check every 30 min not every 10
-ROUTINE_CHECK_EVERY = 1800
+# same pace as notices, so a routine change or outage is noticed sooner
+ROUTINE_CHECK_EVERY = CHECK_EVERY
 
 
 # simple health check server for Render
@@ -100,7 +100,8 @@ class HealthHandler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.getenv('PORT', 10000))
     print(f'[HEALTH] Starting health check server on port {port}...')
-    HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
+    # threaded: a slow /?test= fetch must not block Render's health check
+    ThreadingHTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
 
 
 # keep files next to this script
@@ -254,12 +255,11 @@ async def _get_exam_notices():
     endpoint can call it from a different thread/event loop too."""
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(
+            r = await routine.get_with_retry(
+                client,
                 'https://exam.ioe.tu.edu.np/notices',
                 headers={'User-Agent': UA},
-                timeout=10,
             )
-        r.raise_for_status()
         s = BeautifulSoup(r.content, 'html.parser')
         notices = []
         seen = set()
@@ -323,8 +323,7 @@ async def _get_tcioe_notices():
     Returns (notices, method, detail)."""
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(TCIOE_API_URL, headers=TCIOE_HEADERS, timeout=15)
-        r.raise_for_status()
+            r = await routine.get_with_retry(client, TCIOE_API_URL, headers=TCIOE_HEADERS)
         return _parse_tcioe(r.json()), 'direct', None
     except Exception as e:
         return [], None, exc_str(e)
@@ -970,8 +969,8 @@ async def scheduled_loop():
 
 
 async def routine_loop():
-    """Check the BCT 2081-AB sem5 routine for changes every 30 min."""
-    print('[ROUTINE] Loop started (checks every 30 min)')
+    """Check the BCT 2081-AB sem5 routine for changes every 10 min."""
+    print(f'[ROUTINE] Loop started (checks every {ROUTINE_CHECK_EVERY // 60} min)')
     while True:
         try:
             await routine.check_and_notify(

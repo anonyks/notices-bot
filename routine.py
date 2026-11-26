@@ -50,13 +50,33 @@ DIFF_FIELDS = [
     ('isLab', 'lab'), ('dualLab', 'dual lab'), ('is_elective', 'elective'),
 ]
 CAPTION_MAX = 1024  # Telegram document caption limit
-MAX_ATTEMPTS = 48  # about a day of retries at one per 30 min
+MAX_ATTEMPTS = 144  # about a day of retries at one per 10 min
+FETCH_TIMEOUT = 30  # the campus and TU sites are sometimes slow
+FETCH_RETRY_WAIT = 5
 KEEP_ALERTS = 20  # finished alerts kept for their message ids
 
 
+async def get_with_retry(client, url, **kwargs):
+    """GET for the scrapers: one retry after a timeout, connection error or 5xx,
+    so a brief blip doesn't raise an operator alert."""
+    for attempt in (1, 2):
+        try:
+            r = await client.get(url, timeout=FETCH_TIMEOUT, **kwargs)
+        except httpx.TransportError as e:
+            if attempt == 2:
+                raise
+            reason = type(e).__name__
+        else:
+            if r.status_code < 500 or attempt == 2:
+                r.raise_for_status()
+                return r
+            reason = f'HTTP {r.status_code}'
+        print(f"fetch {url.split('/')[2]}: {reason}, retrying in {FETCH_RETRY_WAIT}s")
+        await asyncio.sleep(FETCH_RETRY_WAIT)
+
+
 async def fetch_routine(http):
-    r = await http.get(ROUTINE_URL, params=ROUTINE_PARAMS, headers=ROUTINE_HEADERS, timeout=20)
-    r.raise_for_status()
+    r = await get_with_retry(http, ROUTINE_URL, params=ROUTINE_PARAMS, headers=ROUTINE_HEADERS)
     cells = r.json().get('cells')
     if not cells:
         # never treat an empty or malformed reply as "every class removed"
