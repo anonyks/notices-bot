@@ -105,7 +105,7 @@ def get_initials(name):
 
 def generate_pdf(raw_cells):
     """Static HTML -> PDF via weasyprint, straight from the JSON. No browser."""
-    days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
+    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
     legend = {}
     for c in raw_cells:
         for t in c.get('teachers', []):
