@@ -276,6 +276,48 @@ def deadlines_today(rows, now=None):
     return out
 
 
+def parse_reminder(text, deadline_ad, deadline_time=None):
+    """'2h before' or '2026-11-30 2pm' -> reminder time (ISO)."""
+    text = ' '.join((text or '').lower().split())
+    m = re.fullmatch(r'(\d{1,3}) ?([mhd])(?: before)?', text)
+    if m:
+        step = timedelta(minutes=int(m.group(1)) * {'m': 1, 'h': 60, 'd': 1440}[m.group(2)])
+        return (deadline_moment(deadline_ad, deadline_time).replace(second=0) - step).isoformat()
+    day, _, clock = text.partition(' ')
+    if not clock:
+        raise ValueError('Use 2h before, 1d before, or YYYY-MM-DD 2pm.')
+    hour, minute = (int(x) for x in parse_deadline_time(clock).split(':'))
+    return datetime.combine(ad_from_input(day), time(hour, minute), tzinfo=NPT).isoformat()
+
+
+def require_valid_reminder(reminder_at, deadline_ad, deadline_time=None, publish_at=None):
+    if not reminder_at:
+        return
+    when = datetime.fromisoformat(reminder_at)
+    if when <= now_npt():
+        raise ValueError('That reminder time has already passed.')
+    if when >= deadline_moment(deadline_ad, deadline_time).replace(second=0):
+        raise ValueError('The reminder must be before the deadline.')
+    if publish_at and when < datetime.fromisoformat(publish_at):
+        raise ValueError('The reminder is before the post goes out.')
+
+
+def describe_reminder(r):
+    at = r.get('reminder_at')
+    return f'{format_publish_at(at)} NPT' if at else 'Default (6:00 PM, usually the day before)'
+
+
+def custom_reminders_due(rows, now=None):
+    now = now or now_npt()
+    return [
+        r for r in rows
+        if has_deadline(r) and r.get('reminder_at') and not r.get('reminder_sent')
+        and r.get('status') not in ('expired', 'scheduled')
+        and datetime.fromisoformat(r['reminder_at']) <= now
+        and not is_expired(r['deadline_ad'], now, r.get('deadline_time'))
+    ]
+
+
 def already_reminded_for_deadline(r):
     """True if we already sent a 6pm reminder for this notice's current deadline."""
     dl = r.get('deadline_ad')
@@ -292,7 +334,7 @@ def deadlines_for_reminder(rows, now=None):
     now = now or now_npt()
     out = []
     for r in deadlines_today(rows, now=now) + deadlines_tomorrow(rows, now=now):
-        if already_reminded_for_deadline(r):
+        if already_reminded_for_deadline(r) or r.get('reminder_at'):
             continue
         out.append(r)
     return out

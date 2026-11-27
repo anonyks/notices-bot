@@ -965,6 +965,7 @@ async def scheduled_loop():
                 n = await menu.publish_due_scheduled()
                 if n:
                     print(f'[SCHEDULE] published {n} notice(s)')
+                await menu.send_due_custom_reminders()
         except Exception as e:
             print(f'[SCHEDULE] error: {e}')
         await asyncio.sleep(30)

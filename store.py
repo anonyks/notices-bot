@@ -102,7 +102,7 @@ def load_reminder_posts():
 
 
 _REMINDER_KEYS = ('notice_ids', 'telegram', 'discord')
-KEEP_EARLIER_REMINDERS = 20
+KEEP_EARLIER_REMINDERS = 50
 
 
 def _reminder_entry(st):
@@ -120,6 +120,13 @@ def save_reminder_posts(data):
         earlier.append(_reminder_entry(old))
     if earlier:
         st['earlier'] = earlier[-KEEP_EARLIER_REMINDERS:]
+    _save_reminder_state(st)
+
+
+def add_reminder_record(entry):
+    """Save a custom reminder's message ids so it can be deleted at expiry."""
+    st = _load_reminder_state()
+    st['earlier'] = (list(st.get('earlier') or []) + [entry])[-KEEP_EARLIER_REMINDERS:]
     _save_reminder_state(st)
 
 

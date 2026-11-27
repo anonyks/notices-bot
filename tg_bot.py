@@ -1,7 +1,10 @@
 # Telegram menu / wizard for manual notices
+import asyncio
 import json
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+
+import httpx
 
 import store
 import dates_npt as dn
@@ -9,6 +12,7 @@ import dates_npt as dn
 # per-chat wizard state: { chat_id: {step, draft, ...} }
 sessions = {}
 waiting_for_post = {}  # chat_id -> True after /post
+reminder_retry_after = {}  # notice id -> earliest next try
 
 
 def parse_chat_ids(raw):
@@ -167,7 +171,9 @@ def format_reminder_bundle(items):
     # Avoid "1." markdown lists — Discord glues the next line onto the title.
     today = dn.today_npt().isoformat()
     due_today = [n for n in items if n.get('deadline_ad') == today]
-    due_tmr = [n for n in items if n.get('deadline_ad') != today]
+    tomorrow = (dn.today_npt() + timedelta(days=1)).isoformat()
+    due_tmr = [n for n in items if n.get('deadline_ad') == tomorrow]
+    due_later = [n for n in items if n.get('deadline_ad') > tomorrow]
 
     lines = [
         '⏰ REMINDER',
@@ -187,6 +193,7 @@ def format_reminder_bundle(items):
 
     add_section('Due TODAY', due_today)
     add_section('Due TOMORROW', due_tmr)
+    add_section('Due LATER', due_later)
     lines.append('━━━━━━━━━━━━━━━━')
     midnight = all((n.get('deadline_time') or dn.DEFAULT_DEADLINE_TIME) == dn.DEFAULT_DEADLINE_TIME for n in items)
     lines.append('Finish it before midnight.' if midnight else 'Finish it before the deadline.')
@@ -1063,8 +1070,18 @@ class TgMenu:
                 sess['step'] = 'create_deadline_cal'
                 await self._ask_calendar(chat_id, prefix='create')
                 return
-            sess['step'] = 'create_preview'
-            await self._show_preview(chat_id, sess)
+            sess['draft'].pop('reminder_at', None)
+            await self._ask_reminder(chat_id, sess, 'create')
+            return
+
+        if data.endswith((':rem:default', ':rem:custom')):
+            mode = data.split(':')[0]
+            if sess.get('step') != f'{mode}_reminder_input':
+                return
+            if data.endswith('default'):
+                await self._set_reminder(chat_id, sess, mode, None)
+            else:
+                await self.send(chat_id, 'Remind when? (Nepal time)\n2h before, 1d before, or YYYY-MM-DD 2pm (AD)')
             return
 
         if data == 'create:dl:retry':
@@ -1100,8 +1117,11 @@ class TgMenu:
                 deadline_time=at or dn.DEFAULT_DEADLINE_TIME,
                 status=keep_status,
                 reminded_for_deadline=None,  # new deadline → allow one fresh reminder
+                reminder_at=None,
+                reminder_sent=None,
             )
-            await self._after_edit(chat_id, nid, 'Deadline')
+            what = 'Deadline (reminder is now Default)' if (n or {}).get('reminder_at') else 'Deadline'
+            await self._after_edit(chat_id, nid, what)
             return
 
         if data == 'edit:dl:retry':
@@ -1124,6 +1144,9 @@ class TgMenu:
                 if dn.has_deadline(draft):
                     dn.require_future_deadline(date.fromisoformat(draft['deadline_ad']))
                     dn.require_future_deadline_time(draft['deadline_ad'], draft.get('deadline_time'))
+                if dn.has_deadline(draft):
+                    dn.require_valid_reminder(draft.get('reminder_at'), draft['deadline_ad'],
+                                              draft.get('deadline_time'), draft.get('publish_at'))
                 if draft.get('publish_at'):
                     dn.require_future_publish_at(datetime.fromisoformat(draft['publish_at']))
                     if dn.has_deadline(draft):
@@ -1182,6 +1205,8 @@ class TgMenu:
                 n = store.get_manual(nid)
                 if n and dn.has_deadline(n):
                     dn.require_schedule_before_deadline(publish_at, n['deadline_ad'], n.get('deadline_time'))
+                    dn.require_valid_reminder(n.get('reminder_at'), n['deadline_ad'],
+                                              n.get('deadline_time'), publish_at)
             except Exception as e:
                 await self.send(chat_id, f'{e}\nTry again.')
                 sess['step'] = 'edit_schedule_input'
@@ -1229,6 +1254,8 @@ class TgMenu:
             ]
             if n.get('category') in dn.DEADLINE_CATEGORIES:
                 buttons.append([{'text': 'Deadline', 'callback_data': 'edit:field:deadline'}])
+            if dn.has_deadline(n):
+                buttons.append([{'text': 'Reminder', 'callback_data': 'edit:field:reminder'}])
             if n.get('status') == 'scheduled':
                 buttons.append([{'text': 'Post time', 'callback_data': 'edit:field:schedule'}])
             buttons.append([{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}])
@@ -1252,6 +1279,9 @@ class TgMenu:
                 return
             if field == 'schedule' and n.get('status') != 'scheduled':
                 await self.send(chat_id, 'Only scheduled (not yet posted) notices.')
+                return
+            if field == 'reminder':
+                await self._ask_reminder(chat_id, sess, 'edit')
                 return
             sess['draft']['field'] = field
             if field == 'deadline':
@@ -1357,6 +1387,8 @@ class TgMenu:
         else:
             head = 'PREVIEW — tap Publish to send\n\n'
             btn = '✅ Publish'
+        if dn.has_deadline(draft):
+            head += f'Reminder: {dn.describe_reminder(draft)}\n\n'
         text = head + format_notice_text(draft) + notice_length_warning(draft)
         await self.send(
             chat_id,
@@ -1368,6 +1400,60 @@ class TgMenu:
                 ]
             ]),
         )
+
+    async def _ask_reminder(self, chat_id, sess, mode):
+        sess['step'] = f'{mode}_reminder_input'
+        await self.send(
+            chat_id,
+            'Reminder?\nDefault is 6:00 PM, usually the day before.',
+            reply_markup=inline([
+                [
+                    {'text': 'Default', 'callback_data': f'{mode}:rem:default'},
+                    {'text': 'Custom', 'callback_data': f'{mode}:rem:custom'},
+                ],
+                [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
+            ]),
+        )
+
+    async def _set_reminder(self, chat_id, sess, mode, reminder_at):
+        if mode == 'create':
+            sess['draft']['reminder_at'] = reminder_at
+            sess['step'] = 'create_preview'
+            await self._show_preview(chat_id, sess)
+            return
+        nid = sess['draft']['id']
+        n = store.update_manual(nid, reminder_at=reminder_at, reminder_sent=None, reminded_for_deadline=None)
+        await self._cleanup_wizard(chat_id)
+        self._clear(chat_id)
+        await self.send(chat_id, f'✅ Reminder saved: {dn.describe_reminder(n or {})}',
+                        reply_markup=main_reply_keyboard(), track=False)
+
+    async def send_due_custom_reminders(self):
+        """Send once. Retry only when it clearly never arrived, so no reposts."""
+        for n in dn.custom_reminders_due(store.load_manual()):
+            if dn.now_npt() < reminder_retry_after.get(n['id'], dn.now_npt()):
+                continue
+            text = format_reminder_bundle([n])
+            tg, dc, unsure = [], [], []
+            try:
+                tg = await self.send_all_tracked(text, reply_to_by_chat=reply_to_by_chat_from_notice(n))
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                pass  # never reached Telegram
+            except Exception as e:
+                unsure.append(type(e).__name__)
+            try:
+                dc = await self.send_discord_text_file(
+                    text, reply_to_refs=(n.get('published') or {}).get('discord'), unsure=unsure) or []
+            except Exception as e:
+                unsure.append(type(e).__name__)
+            if not (tg or dc or unsure):
+                reminder_retry_after[n['id']] = dn.now_npt() + timedelta(minutes=5)
+                continue
+            print(f'[REMINDER] custom: telegram={len(tg)} discord={len(dc)} unclear={len(unsure)}')
+            store.update_manual(n['id'], reminder_sent=True)
+            if tg or dc:
+                store.add_reminder_record({'notice_ids': [n['id']], 'telegram': tg, 'discord': dc})
+            await asyncio.to_thread(store.flush_gist_backup)
 
     async def _after_edit(self, chat_id, nid, what):
         sess = sessions.get(str(chat_id)) or {}
@@ -1515,6 +1601,20 @@ class TgMenu:
 
         if step == 'create_deadline_input' and txt:
             await self._handle_deadline_input(chat_id, sess, txt, mode='create')
+            return
+
+        if step in ('create_reminder_input', 'edit_reminder_input') and txt:
+            mode = step.split('_')[0]
+            n = sess['draft'] if mode == 'create' else store.get_manual(sess['draft'].get('id'))
+            try:
+                at = dn.parse_reminder(txt, n['deadline_ad'], n.get('deadline_time'))
+                scheduled = mode == 'create' or n.get('status') == 'scheduled'
+                dn.require_valid_reminder(at, n['deadline_ad'], n.get('deadline_time'),
+                                          n.get('publish_at') if scheduled else None)
+            except Exception as e:
+                await self.send(chat_id, f'Invalid: {e}\nTry again.')
+                return
+            await self._set_reminder(chat_id, sess, mode, at)
             return
 
         if step in ('create_time_input', 'edit_time_input') and txt:
