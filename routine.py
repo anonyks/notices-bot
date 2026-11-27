@@ -234,6 +234,10 @@ def _room(name):
     return name or 'no room'
 
 
+def _class_name(c):
+    return c['subject'] + (f" group {c['labGroup']}" if c['labGroup'] else '')
+
+
 def _match_old(new_cells, old_cells):
     """{index of new cell: (kind, old cell)} for classes that existed before."""
     left, matches = list(old_cells), {}
@@ -306,20 +310,26 @@ def build_messages(old_cells, new_cells):
                 f"{number}. {_hm(c['start_time'])}-{_hm(c['end_time'])}: {c['subject']} ({tags})\n"
                 f"   {_room(c['room'])} ({', '.join(c['teachers']) or 'no teacher'})"
                 + (' [NEW]' if kind == 'new' else _label(kind, old, c)))
-        gone = [f"Removed: {c['subject']}{' group ' + c['labGroup'] if c['labGroup'] else ''}, "
-                f"{_hm(c['start_time'])}-{_hm(c['end_time'])}" for c in removed if c['day'] == day]
+        gone = [f"Removed: {_class_name(c)}, {_hm(c['start_time'])}-{_hm(c['end_time'])}"
+                for c in removed if c['day'] == day]
+        # a class that left for another day is also noted on the day it left
+        gone += [f"Moved to {new_cells[i]['day'][:3]}: {_class_name(old)}"
+                 for i, (_, old) in sorted(matches.items())
+                 if old['day'] == day and new_cells[i]['day'] != day]
         entries = entries or ['No classes']
-        blocks.append(f'{title}\n\n' + entries[0])
-        blocks += entries[1:] + gone
+        blocks.append((title, f'{title}\n\n' + entries[0], True))
+        blocks += [(title, text, False) for text in entries[1:] + gone]
 
     limit = CAPTION_MAX - _tg_len(f'\n\n📎 {PDF_SEND_NAME}')
     messages = ['\n'.join(MESSAGE_HEAD)]
-    for block in blocks:
+    for title, block, starts_day in blocks:
         joined = f'{messages[-1]}\n\n{block}'
         if _tg_len(joined) <= limit:
             messages[-1] = joined
         else:
-            messages.append(f'ROUTINE CHANGED (continued)\n\n{block}')
+            # a split in the middle of a day repeats which day it is
+            day_line = '' if starts_day else f'{title} (continued)\n\n'
+            messages.append(f'ROUTINE CHANGED (continued)\n\n{day_line}{block}')
     return messages
 
 
