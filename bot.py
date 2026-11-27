@@ -33,8 +33,8 @@ from tg_bot import (
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
 # check every 10 min (was 5) so we use less Render bandwidth
 CHECK_EVERY = 600
-# same pace as notices, so a routine change or outage is noticed sooner
-ROUTINE_CHECK_EVERY = CHECK_EVERY
+# routine changes rarely, check every 30 min
+ROUTINE_CHECK_EVERY = 1800
 
 
 # simple health check server for Render
@@ -972,7 +972,7 @@ async def scheduled_loop():
 
 
 async def routine_loop():
-    """Check the BCT 2081-AB sem5 routine for changes every 10 min."""
+    """Check the BCT 2081-AB sem5 routine for changes every 30 min."""
     print(f'[ROUTINE] Loop started (checks every {ROUTINE_CHECK_EVERY // 60} min)')
     while True:
         try:

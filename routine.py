@@ -51,7 +51,7 @@ DIFF_FIELDS = [
 ]
 CAPTION_MAX = 1024  # Telegram document caption limit
 MESSAGE_HEAD = ['ROUTINE CHANGED', '━━━━━━━━━━━━━━━━', 'BCT 2081-AB, Semester 5']
-MAX_ATTEMPTS = 144  # about a day of retries at one per 10 min
+MAX_ATTEMPTS = 48  # about a day of retries at one per 30 min
 FETCH_TIMEOUT = 30  # the campus and TU sites are sometimes slow
 FETCH_RETRY_WAIT = 5
 # the routine site is slower and flakier: wait longer and try three times
