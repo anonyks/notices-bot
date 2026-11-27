@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import html as html_lib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -58,6 +58,8 @@ FETCH_RETRY_WAIT = 5
 ROUTINE_TIMEOUT = 60
 ROUTINE_RETRY_WAITS = (5, 20)
 KEEP_ALERTS = 20  # finished alerts kept for their message ids
+REPLACE_WINDOW = timedelta(hours=24)
+REVERSED_TEXT = 'The earlier change was reversed. The routine is back to its previous version.'
 
 
 async def get_with_retry(client, url, timeout=FETCH_TIMEOUT, waits=(FETCH_RETRY_WAIT,), **kwargs):
@@ -555,7 +557,66 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
         await _save_now(state)
 
 
-async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None, webhooks=()):
+def _last_batch(alerts):
+    """The parts of the latest alert (only the last part has the PDF)."""
+    start = len(alerts) - 1
+    while start > 0 and alerts[start - 1].get('pdf') is False:
+        start -= 1
+    return alerts[start:] if alerts else []
+
+
+def _take_over(batch, now):
+    """(base cells, since, message ids to delete) if the latest alert can be replaced."""
+    first = batch[0] if batch else {}
+    if not first.get('base') or now - datetime.fromisoformat(first['since']) >= REPLACE_WINDOW:
+        return None
+    old = {'telegram': [], 'discord': []}
+    for alert in batch:
+        for source in (alert['published'], alert.get('replaces') or {}):
+            for kind in old:
+                old[kind] += source.get(kind) or []
+    return first['base'], first['since'], old
+
+
+async def delete_replaced(http, state, tg_token, tg_chat_ids, delete_discord, webhooks):
+    """Delete a replaced alert, per destination, only once every part of the
+    new one is confirmed there. One attempt each."""
+    batch = _last_batch(state.get('alerts') or [])
+    old = batch[0].get('replaces') if batch else None
+    if not old:
+        return
+
+    def has_all(kind, dest):
+        key = (lambda r: r['chat_id']) if kind == 'telegram' else (lambda r: webhook_id(r['webhook_url']))
+        return all(any(key(r) == dest for r in a['published'][kind]) for a in batch)
+
+    changed = False
+    for ref in list(old['telegram']):
+        if not has_all('telegram', ref['chat_id']):
+            continue
+        for mid in ref['message_ids']:
+            try:
+                r = await http.post(f'https://api.telegram.org/bot{tg_token}/deleteMessage',
+                                    data={'chat_id': ref['chat_id'], 'message_id': mid}, timeout=30)
+                if r.status_code != 200:
+                    print(f'[ROUTINE] old telegram alert not deleted: HTTP {r.status_code}')
+            except Exception as e:
+                print(f'[ROUTINE] old telegram alert not deleted: {type(e).__name__}')
+        old['telegram'].remove(ref)
+        changed = True
+    for ref in list(old['discord']):
+        if not delete_discord or not has_all('discord', webhook_id(ref['webhook_url'])):
+            continue
+        if not await delete_discord(ref['webhook_url'], ref['message_id']):
+            print('[ROUTINE] old discord alert not deleted')
+        old['discord'].remove(ref)
+        changed = True
+    if changed:
+        await _save_now(state)
+
+
+async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=None, webhooks=(),
+                           delete_discord=None):
     """Fetch, compare with the saved baseline, and alert on an actual change.
     The first run only saves the baseline."""
     raw_cells = await fetch_routine(http)
@@ -578,9 +639,24 @@ async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=N
             print(f'[ROUTINE] CHANGE DETECTED: {len(changes)} change(s)')
             for line in changes:
                 print(' ', line)
-            texts = build_messages(state_before, cells)
-            alerts = state.get('alerts', []) + [{
-                'detected_at': datetime.now(timezone.utc).isoformat(),
+            now = datetime.now(timezone.utc)
+            alerts = state.get('alerts', [])
+            batch = _last_batch(alerts)
+            replaced = _take_over(batch, now)
+            if replaced:
+                # one combined alert, compared with the version before the one it replaces
+                base, since, old_ids = replaced
+                alerts = alerts[:len(alerts) - len(batch)]
+            else:
+                base, since, old_ids = state_before, now.isoformat(), None
+            if diff_summary(base, cells):
+                texts = build_messages(base, cells)
+            else:
+                texts = ['\n'.join(MESSAGE_HEAD + ['', REVERSED_TEXT])]
+            for a in alerts:
+                a.pop('base', None)  # only the latest alert needs it
+            new_alerts = [{
+                'detected_at': now.isoformat(),
                 'changes': changes if i == 0 else [],
                 'text': text,
                 'pdf': i == len(texts) - 1,
@@ -590,6 +666,10 @@ async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=N
                 },
                 'published': {'telegram': [], 'discord': []},
             } for i, text in enumerate(texts)]
+            new_alerts[0].update(base=base, since=since)
+            if old_ids:
+                new_alerts[0]['replaces'] = old_ids
+            alerts = alerts + new_alerts
             old = [a for a in alerts if not a.get('waiting')][:-KEEP_ALERTS]
             state['alerts'] = [a for a in alerts if a not in old]
         else:
@@ -599,3 +679,4 @@ async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=N
 
     await deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
                           send_discord_text_file, webhooks)
+    await delete_replaced(http, state, tg_token, tg_chat_ids, delete_discord, webhooks)

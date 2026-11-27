@@ -977,7 +977,8 @@ async def routine_loop():
     while True:
         try:
             await routine.check_and_notify(
-                http, tg_token, tg_chat_ids, send_discord_text_file, [w1, w2])
+                http, tg_token, tg_chat_ids, send_discord_text_file, [w1, w2],
+                delete_discord_message)
             clear_scrape_error('routine')
         except Exception as e:
             print(f'[ROUTINE] error: {exc_str(e)}')
