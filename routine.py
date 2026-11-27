@@ -50,6 +50,7 @@ DIFF_FIELDS = [
     ('isLab', 'lab'), ('dualLab', 'dual lab'), ('is_elective', 'elective'),
 ]
 CAPTION_MAX = 1024  # Telegram document caption limit
+MESSAGE_HEAD = ['ROUTINE CHANGED', '━━━━━━━━━━━━━━━━', 'BCT 2081-AB, Semester 5']
 MAX_ATTEMPTS = 144  # about a day of retries at one per 10 min
 FETCH_TIMEOUT = 30  # the campus and TU sites are sometimes slow
 FETCH_RETRY_WAIT = 5
@@ -226,21 +227,104 @@ def diff_summary(old_cells, new_cells):
     return [line for _, line in entries]
 
 
+def _room(name):
+    """'Computer Lab #5 [D-106]' -> 'Room D-106'."""
+    if name and name.endswith(']') and '[' in name:
+        return f"Room {name[name.rindex('[') + 1:-1]}"
+    return name or 'no room'
+
+
+def _match_old(new_cells, old_cells):
+    """{index of new cell: (kind, old cell)} for classes that existed before."""
+    left, matches = list(old_cells), {}
+
+    def same_class(o, n):
+        return (o['subject'], o['course_type'], o['labGroup']) == (n['subject'], n['course_type'], n['labGroup'])
+
+    def same_start(o, n):
+        return (o['day'], o['start_time']) == (n['day'], n['start_time'])
+
+    # closest match first: identical, same time, moved within a day, moved to another day
+    for kind, test in [
+        ('same', lambda o, n: o == n),
+        ('changed', lambda o, n: same_start(o, n) and same_class(o, n)),
+        ('changed', lambda o, n: same_start(o, n) and o['subject'] == n['subject']),
+        ('moved', lambda o, n: o['day'] == n['day'] and same_class(o, n)),
+        ('moved', same_class),
+    ]:
+        for i, n in enumerate(new_cells):
+            found = [o for o in left if i not in matches and test(o, n)]
+            if found:
+                o = min(found, key=lambda c: abs(c['periodIndex'] - n['periodIndex']))
+                matches[i] = (kind, o)
+                left.remove(o)
+    return matches, left
+
+
+def _label(kind, old, new):
+    if kind == 'same':
+        return ''
+    skip = {'subject', 'start_time'}
+    if kind == 'moved' or old['end_time'] != new['end_time']:
+        skip.add('periods')
+    if kind == 'moved':
+        skip.add('end_time')
+    diffs = [(f, name) for f, name in DIFF_FIELDS if f not in skip and old.get(f) != new.get(f)]
+    # a code-only change matters; alongside other changes it is noise
+    if len(diffs) > 1:
+        diffs = [d for d in diffs if d[0] != 'subject_code']
+    detail = ', '.join(f'{name} was {_show(f, old.get(f))}' for f, name in diffs)
+    if kind == 'moved':
+        day = '' if old['day'] == new['day'] else f"{old['day'][:3]} "
+        return f" [MOVED from {day}{_hm(old['start_time'])}{'; ' + detail if detail else ''}]"
+    return f' [CHANGED: {detail}]'
+
+
+def build_messages(old_cells, new_cells):
+    """The new timetable of each affected day, with what changed marked. Split
+    into several messages, never cut off, if it exceeds the caption limit."""
+    matches, removed = _match_old(new_cells, old_cells)
+    affected = {c['day'] for c in removed}
+    for i, n in enumerate(new_cells):
+        kind, old = matches.get(i, ('new', None))
+        if kind != 'same':
+            affected.add(n['day'])
+            if old:
+                affected.add(old['day'])
+
+    blocks = []
+    for day in sorted(affected, key=_day_rank):
+        title = f'Updated {day} timetable'
+        today = sorted((i for i, c in enumerate(new_cells) if c['day'] == day),
+                       key=lambda i: (new_cells[i]['start_time'] or '', new_cells[i]['labGroup'] or ''))
+        entries = []
+        for number, i in enumerate(today, 1):
+            c = new_cells[i]
+            kind, old = matches.get(i, ('new', None))
+            tags = ', '.join(t for t in (c['course_type'], c['labGroup']) if t)
+            entries.append(
+                f"{number}. {_hm(c['start_time'])}-{_hm(c['end_time'])}: {c['subject']} ({tags})\n"
+                f"   {_room(c['room'])} ({', '.join(c['teachers']) or 'no teacher'})"
+                + (' [NEW]' if kind == 'new' else _label(kind, old, c)))
+        gone = [f"Removed: {c['subject']}{' group ' + c['labGroup'] if c['labGroup'] else ''}, "
+                f"{_hm(c['start_time'])}-{_hm(c['end_time'])}" for c in removed if c['day'] == day]
+        entries = entries or ['No classes']
+        blocks.append(f'{title}\n\n' + entries[0])
+        blocks += entries[1:] + gone
+
+    limit = CAPTION_MAX - _tg_len(f'\n\n📎 {PDF_SEND_NAME}')
+    messages = ['\n'.join(MESSAGE_HEAD)]
+    for block in blocks:
+        joined = f'{messages[-1]}\n\n{block}'
+        if _tg_len(joined) <= limit:
+            messages[-1] = joined
+        else:
+            messages.append(f'ROUTINE CHANGED (continued)\n\n{block}')
+    return messages
+
+
 def _tg_len(text):
     return len(text.encode('utf-16-le')) // 2
-
-
-def build_message(changes, with_pdf=True):
-    """Fits Telegram's caption limit; says how many changes were left out."""
-    head = ['ROUTINE CHANGED', '━━━━━━━━━━━━━━━━', 'BCT 2081-AB, Semester 5', '']
-    tail = ['', f'📎 {PDF_SEND_NAME}'] if with_pdf else []
-    for shown in range(len(changes), -1, -1):
-        left = len(changes) - shown
-        note = [f'+ {left} more changes' + (', check the PDF' if with_pdf else '')] if left else []
-        text = '\n'.join(head + changes[:shown] + note + tail)
-        if _tg_len(text) <= CAPTION_MAX:
-            break
-    return text
 
 
 def get_initials(name):
@@ -412,14 +496,17 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
 
     for alert in pending:
         alert['attempts'] = alert.get('attempts', 0) + 1
-        text = build_message(alert['changes'], with_pdf=bool(pdf_bytes))
+        text = alert.get('text') or '\n'.join(MESSAGE_HEAD + [''] + alert['changes'])[:CAPTION_MAX]
+        attach = pdf_bytes if alert.get('pdf', True) else None
+        if attach:
+            text += f'\n\n📎 {PDF_SEND_NAME}'
         waiting, published = alert['waiting'], alert['published']
 
         for chat_id in list(waiting.get('telegram', [])):
             if not tg_token or chat_id not in [str(c) for c in tg_chat_ids]:
                 waiting['telegram'].remove(chat_id)
                 continue
-            mid, retry = await send_telegram_alert(http, tg_token, chat_id, text, pdf_bytes)
+            mid, retry = await send_telegram_alert(http, tg_token, chat_id, text, attach)
             if mid:
                 published['telegram'].append({'chat_id': chat_id, 'message_ids': [mid]})
             if not retry:
@@ -433,8 +520,8 @@ async def deliver_pending(http, state, raw_cells, tg_token, tg_chat_ids,
             unsure = []
             try:
                 refs = await send_discord_text_file(
-                    text, file_bytes=pdf_bytes,
-                    filename=PDF_SEND_NAME if pdf_bytes else None,
+                    text, file_bytes=attach,
+                    filename=PDF_SEND_NAME if attach else None,
                     only_webhooks=[hooks[hook]], unsure=unsure,
                 )
             except Exception as e:
@@ -474,21 +561,25 @@ async def check_and_notify(http, tg_token, tg_chat_ids, send_discord_text_file=N
     if state.get('hash') == h:
         print(f'[ROUTINE] no change, {len(cells)} cells.')
     else:
-        changes = diff_summary(state.get('cells') or [], cells)
+        state_before = state.get('cells') or []
+        changes = diff_summary(state_before, cells)
         state.update(hash=h, cells=cells)
         if changes:
             print(f'[ROUTINE] CHANGE DETECTED: {len(changes)} change(s)')
             for line in changes:
                 print(' ', line)
+            texts = build_messages(state_before, cells)
             alerts = state.get('alerts', []) + [{
                 'detected_at': datetime.now(timezone.utc).isoformat(),
-                'changes': changes,
+                'changes': changes if i == 0 else [],
+                'text': text,
+                'pdf': i == len(texts) - 1,
                 'waiting': {
                     'telegram': [str(c) for c in tg_chat_ids] if tg_token else [],
                     'discord': [webhook_id(w) for w in webhooks if w] if send_discord_text_file else [],
                 },
                 'published': {'telegram': [], 'discord': []},
-            }]
+            } for i, text in enumerate(texts)]
             old = [a for a in alerts if not a.get('waiting')][:-KEEP_ALERTS]
             state['alerts'] = [a for a in alerts if a not in old]
         else:
