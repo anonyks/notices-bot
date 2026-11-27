@@ -1,4 +1,5 @@
 # Nepal time + AD/BS deadline helpers
+import re
 from datetime import date, datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,9 @@ except ImportError:
     nep_dt = None
 
 NPT = ZoneInfo('Asia/Kathmandu')
+
+DEADLINE_CATEGORIES = ('assignment', 'general')
+DEFAULT_DEADLINE_TIME = '23:59'
 
 
 def now_npt():
@@ -53,9 +57,51 @@ def ad_to_bs_str(ad_date):
     return f'{bs.year:04d}-{bs.month:02d}-{bs.day:02d}'
 
 
-def format_deadline_pair(ad_date):
+def parse_deadline_time(text):
+    """'17:00', '5pm' or '5:30 PM' -> 'HH:MM' (24h)."""
+    cleaned = (text or '').strip().lower().replace('.', '')
+    m = re.fullmatch(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', cleaned)
+    if not m or (m.group(2) is None and m.group(3) is None):
+        raise ValueError('Use a time like 11:59 PM, 5pm or 17:00.')
+    hour, minute, half = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+    if half:
+        if not 1 <= hour <= 12:
+            raise ValueError('With AM/PM the hour must be 1 to 12.')
+        hour = hour % 12 + (12 if half == 'pm' else 0)
+    if hour > 23 or minute > 59:
+        raise ValueError('Not a real time.')
+    return f'{hour:02d}:{minute:02d}'
+
+
+def format_time_12h(value):
+    hour, minute = (int(x) for x in (value or DEFAULT_DEADLINE_TIME).split(':'))
+    return f"{hour % 12 or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+def deadline_moment(ad_date, deadline_time=None):
+    """Last moment of the deadline minute, Nepal time. No time means 11:59 PM."""
+    if isinstance(ad_date, str):
+        ad_date = date.fromisoformat(ad_date)
+    hour, minute = (int(x) for x in (deadline_time or DEFAULT_DEADLINE_TIME).split(':'))
+    return datetime.combine(ad_date, time(hour, minute, 59), tzinfo=NPT)
+
+
+def require_future_deadline_time(ad_date, deadline_time=None):
+    if deadline_moment(ad_date, deadline_time) < now_npt():
+        raise ValueError(
+            f'{format_time_12h(deadline_time)} on that day has already passed '
+            f'(now {now_npt().strftime("%Y-%m-%d %H:%M")} NPT).'
+        )
+
+
+def has_deadline(r):
+    return r.get('category') in DEADLINE_CATEGORIES and bool(r.get('deadline_ad'))
+
+
+def format_deadline_pair(ad_date, deadline_time=None):
     day = ad_date.strftime('%A')  # e.g. Wednesday
-    return f'AD {ad_date.isoformat()} ({day})  |  BS {ad_to_bs_str(ad_date)}'
+    at = f', {format_time_12h(deadline_time)}' if deadline_time else ''
+    return f'AD {ad_date.isoformat()} ({day}){at}  |  BS {ad_to_bs_str(ad_date)}'
 
 
 def format_deadline_short(ad_date_or_str):
@@ -86,12 +132,12 @@ def require_future_deadline(ad_date):
     return ad_date
 
 
-def require_schedule_before_deadline(publish_at, deadline_ad):
-    """Scheduled post must not be after end of assignment deadline day."""
+def require_schedule_before_deadline(publish_at, deadline_ad, deadline_time=None):
+    """Scheduled post must not be after the deadline."""
     if not deadline_ad or not publish_at:
         return
     dl = date.fromisoformat(deadline_ad) if isinstance(deadline_ad, str) else deadline_ad
-    end = datetime.combine(dl, time(23, 59, 59), tzinfo=NPT)
+    end = deadline_moment(dl, deadline_time)
     if isinstance(publish_at, str):
         pub = datetime.fromisoformat(publish_at)
     else:
@@ -102,7 +148,8 @@ def require_schedule_before_deadline(publish_at, deadline_ad):
         pub = pub.astimezone(NPT)
     if pub > end:
         raise ValueError(
-            f'Post time ({format_publish_at(pub)}) is after the deadline ({dl.isoformat()}). '
+            f'Post time ({format_publish_at(pub)}) is after the deadline '
+            f'({dl.isoformat()} {format_time_12h(deadline_time)}). '
             'Schedule earlier or change the deadline.'
         )
 
@@ -174,24 +221,22 @@ def scheduled_ready(rows, now=None):
     return out
 
 
-def is_expired(ad_deadline_str, now=None):
-    """Expired after end of deadline day in Nepal time."""
+def is_expired(ad_deadline_str, now=None, deadline_time=None):
+    """Expired once the deadline minute has passed in Nepal time."""
     now = now or now_npt()
-    ad = date.fromisoformat(ad_deadline_str)
-    end = datetime.combine(ad, time(23, 59, 59), tzinfo=NPT)
-    return now > end
+    return now > deadline_moment(ad_deadline_str, deadline_time)
 
 
 def newly_expired_rows(rows):
-    """Mark newly past-deadline assignments expired. Returns those notices."""
+    """Mark newly past-deadline notices expired. Returns those notices."""
     newly = []
     for r in rows:
-        if r.get('category') != 'assignment':
+        if r.get('category') not in DEADLINE_CATEGORIES:
             continue
         if r.get('status') in ('expired', 'scheduled'):
             continue
         dl = r.get('deadline_ad')
-        if dl and is_expired(dl):
+        if dl and is_expired(dl, deadline_time=r.get('deadline_time')):
             r['status'] = 'expired'
             newly.append(r)
     return newly
@@ -207,7 +252,7 @@ def deadlines_tomorrow(rows, now=None):
     tomorrow = (now.date() + timedelta(days=1)).isoformat()
     out = []
     for r in rows:
-        if r.get('category') != 'assignment':
+        if r.get('category') not in DEADLINE_CATEGORIES:
             continue
         if r.get('status') in ('expired', 'scheduled'):
             continue
@@ -222,7 +267,7 @@ def deadlines_today(rows, now=None):
     today = now.date().isoformat()
     out = []
     for r in rows:
-        if r.get('category') != 'assignment':
+        if r.get('category') not in DEADLINE_CATEGORIES:
             continue
         if r.get('status') in ('expired', 'scheduled'):
             continue

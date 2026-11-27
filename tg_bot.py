@@ -79,6 +79,11 @@ def format_from_site(title, url):
     return with_top_gap('\n'.join(lines))
 
 
+def _deadline_text(n):
+    return dn.format_deadline_pair(
+        date.fromisoformat(n['deadline_ad']), n.get('deadline_time') or dn.DEFAULT_DEADLINE_TIME)
+
+
 def format_notice_text(n):
     """Full notice text — same on Telegram preview/follow-up and Discord."""
     cat = n.get('category', 'general')
@@ -109,15 +114,15 @@ def format_notice_text(n):
             lines += ['', body]
     else:
         lines = [
-            'GENERAL NOTICE',
+            'GENERAL NOTICE  ·  _expired_' if n.get('status') == 'expired' else 'GENERAL NOTICE',
             '━━━━━━━━━━━━━━━━',
             title,
         ]
         if body:
             lines += ['', body]
 
-    if cat == 'assignment' and n.get('deadline_ad'):
-        lines += ['', f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}"]
+    if dn.has_deadline(n):
+        lines += ['', f"⏰ Deadline: {_deadline_text(n)}"]
         if n.get('status') == 'expired':
             lines.append('Status: _expired_')
     if n.get('file_name'):
@@ -139,10 +144,10 @@ def format_caption(n):
     elif cat == 'from_site':
         head = 'FROM SITE'
     else:
-        head = 'GENERAL NOTICE'
+        head = 'GENERAL NOTICE  ·  _expired_' if expired else 'GENERAL NOTICE'
     lines = [head, '━━━━━━━━━━━━━━━━', title]
-    if cat == 'assignment' and n.get('deadline_ad'):
-        lines.append(f"⏰ Deadline: {dn.format_deadline_pair(date.fromisoformat(n['deadline_ad']))}")
+    if dn.has_deadline(n):
+        lines.append(f"⏰ Deadline: {_deadline_text(n)}")
         if expired:
             lines.append('Status: _expired_')
     if (n.get('body') or '').strip():
@@ -177,13 +182,14 @@ def format_reminder_bundle(items):
         for i, n in enumerate(group, 1):
             title = n.get('title', 'Untitled')
             lines.append(f'{i}) {title}')
-            lines.append(dn.format_deadline_pair(date.fromisoformat(n['deadline_ad'])))
+            lines.append(_deadline_text(n))
             lines.append('')
 
     add_section('Due TODAY', due_today)
     add_section('Due TOMORROW', due_tmr)
     lines.append('━━━━━━━━━━━━━━━━')
-    lines.append('Finish it before midnight.')
+    midnight = all((n.get('deadline_time') or dn.DEFAULT_DEADLINE_TIME) == dn.DEFAULT_DEADLINE_TIME for n in items)
+    lines.append('Finish it before midnight.' if midnight else 'Finish it before the deadline.')
     return with_top_gap('\n'.join(lines))
 
 
@@ -428,22 +434,19 @@ class TgMenu:
         return newly
 
     async def _cleanup_reminder_if_needed(self, newly_expired):
-        rem = store.load_reminder_posts()
-        if not rem:
-            return
-        rem_ids = set(rem.get('notice_ids') or [])
-        if not rem_ids:
-            return
-        hit = any((n.get('id') in rem_ids) for n in (newly_expired or []))
-        if not hit:
-            return
-        print('[EXPIRE] deleting stored reminder messages')
-        fake = {'published': {
-            'telegram': rem.get('telegram') or [],
-            'discord': rem.get('discord') or [],
-        }}
-        await self.delete_published_notice(fake)
-        store.clear_reminder_posts()
+        """Delete a reminder only once every notice it lists has expired or been deleted."""
+        status = {r.get('id'): r.get('status') for r in store.load_manual()}
+
+        def finished(nid):
+            return nid not in status or status[nid] == 'expired'
+
+        # records are removed before any await, so a new reminder can't be overwritten
+        for rem in store.pop_finished_reminders(finished):
+            print('[EXPIRE] deleting stored reminder messages')
+            await self.delete_published_notice({'published': {
+                'telegram': rem.get('telegram') or [],
+                'discord': rem.get('discord') or [],
+            }})
 
     async def publish_due_scheduled(self):
         """Publish notices whose scheduled time has arrived."""
@@ -457,9 +460,9 @@ class TgMenu:
             if not notice.get('publish_at'):
                 print(f'[SCHEDULE] skip {label} — missing publish_at')
                 continue
-            if notice.get('category') == 'assignment':
+            if dn.has_deadline(notice):
                 dl = notice.get('deadline_ad')
-                if dl and dn.is_expired(dl):
+                if dn.is_expired(dl, deadline_time=notice.get('deadline_time')):
                     print(f'[SCHEDULE] skip {label} — deadline passed')
                     store.update_manual(notice['id'], status='expired')
                     try:
@@ -470,7 +473,7 @@ class TgMenu:
                 pub = notice.get('publish_at')
                 if dl and pub:
                     try:
-                        dn.require_schedule_before_deadline(pub, dl)
+                        dn.require_schedule_before_deadline(pub, dl, notice.get('deadline_time'))
                     except ValueError as e:
                         print(f'[SCHEDULE] skip {label} — {e}')
                         store.update_manual(notice['id'], status='expired')
@@ -725,7 +728,7 @@ class TgMenu:
         rows = store.load_manual()
         active = [r for r in rows if r.get('status') not in ('expired', 'scheduled')]
         scheduled = [r for r in rows if r.get('status') == 'scheduled']
-        assigns = [r for r in active if r.get('category') == 'assignment']
+        with_deadline = [r for r in active if dn.has_deadline(r)]
         upcoming_today = dn.deadlines_today(rows)
         upcoming_tmr = dn.deadlines_tomorrow(rows)
         now = dn.now_npt()
@@ -735,7 +738,7 @@ class TgMenu:
             f'Time now: {now.strftime("%Y-%m-%d %H:%M")}\n'
             f'Active notices: {len(active)}\n'
             f'Scheduled: {len(scheduled)}\n'
-            f'Active assignments: {len(assigns)}\n'
+            f'Active with deadlines: {len(with_deadline)}\n'
             f'Due today: {len(upcoming_today)}\n'
             f'Due tomorrow: {len(upcoming_tmr)}\n'
             f'{format_next_reminder_line(now)}\n'
@@ -796,7 +799,7 @@ class TgMenu:
             for r in active:
                 extra = ''
                 if r.get('deadline_ad'):
-                    extra = f" | {dn.format_deadline_short(r['deadline_ad'])}"
+                    extra = f" | {dn.format_deadline_short(r['deadline_ad'])} {dn.format_time_12h(r.get('deadline_time'))}"
                 lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         else:
             lines += ['(no live posts yet)']
@@ -840,7 +843,7 @@ class TgMenu:
             return
         lines = ['📦 Expired notices', '━━━━━━━━━━━━━━━━', '']
         for r in expired:
-            extra = f" | {dn.format_deadline_short(r['deadline_ad'])}" if r.get('deadline_ad') else ''
+            extra = f" | {dn.format_deadline_short(r['deadline_ad'])} {dn.format_time_12h(r.get('deadline_time'))}" if r.get('deadline_ad') else ''
             lines.append(f"• {cat_emoji(r.get('category'))} {notice_label(r, 50)}{extra}")
         await self.send(chat_id, '\n'.join(lines), reply_markup=inline([
             [{'text': '❌ Close', 'callback_data': 'menu:cancel'}],
@@ -1028,13 +1031,33 @@ class TgMenu:
             )
             return
 
+        if data == 'create:dl:add':
+            sess['step'] = 'create_deadline_cal'
+            await self._ask_calendar(chat_id, prefix='create')
+            return
+
+        if data == 'create:dl:skip':
+            for key in ('deadline_ad', 'deadline_bs', 'deadline_time'):
+                sess['draft'].pop(key, None)
+            sess['step'] = 'create_preview'
+            await self._show_preview(chat_id, sess)
+            return
+
+        if data in ('create:dltime:default', 'edit:dltime:default'):
+            mode = data.split(':')[0]
+            if sess.get('step') == f'{mode}_time_input':
+                await self._handle_time_input(chat_id, sess, dn.DEFAULT_DEADLINE_TIME, mode=mode)
+            return
+
         if data == 'create:dl:confirm':
             ad = sess['draft'].get('deadline_ad')
+            at = sess['draft'].get('deadline_time')
             try:
                 dn.require_future_deadline(date.fromisoformat(ad))
+                dn.require_future_deadline_time(ad, at)
                 pub = sess['draft'].get('publish_at')
                 if pub:
-                    dn.require_schedule_before_deadline(pub, ad)
+                    dn.require_schedule_before_deadline(pub, ad, at)
             except Exception as e:
                 await self.send(chat_id, f'{e}\nPick calendar again:')
                 sess['step'] = 'create_deadline_cal'
@@ -1056,12 +1079,14 @@ class TgMenu:
                 await self.send(chat_id, 'Missing data. Start Edit again.')
                 self._clear(chat_id)
                 return
+            at = sess['draft'].get('deadline_time')
             try:
                 dn.require_future_deadline(date.fromisoformat(ad))
+                dn.require_future_deadline_time(ad, at)
                 n = store.get_manual(nid)
                 pub = (n or {}).get('publish_at') or sess['draft'].get('publish_at')
                 if pub and n and n.get('status') == 'scheduled':
-                    dn.require_schedule_before_deadline(pub, ad)
+                    dn.require_schedule_before_deadline(pub, ad, at)
             except Exception as e:
                 await self.send(chat_id, f'{e}\nPick calendar again:')
                 sess['step'] = 'edit_deadline_cal'
@@ -1072,6 +1097,7 @@ class TgMenu:
                 nid,
                 deadline_ad=ad,
                 deadline_bs=sess['draft'].get('deadline_bs'),
+                deadline_time=at or dn.DEFAULT_DEADLINE_TIME,
                 status=keep_status,
                 reminded_for_deadline=None,  # new deadline → allow one fresh reminder
             )
@@ -1095,13 +1121,14 @@ class TgMenu:
                 await self._reset_chat(chat_id, extra_ids=[preview_mid])
                 return
             try:
-                if draft.get('category') == 'assignment':
+                if dn.has_deadline(draft):
                     dn.require_future_deadline(date.fromisoformat(draft['deadline_ad']))
+                    dn.require_future_deadline_time(draft['deadline_ad'], draft.get('deadline_time'))
                 if draft.get('publish_at'):
                     dn.require_future_publish_at(datetime.fromisoformat(draft['publish_at']))
-                    if draft.get('category') == 'assignment' and draft.get('deadline_ad'):
+                    if dn.has_deadline(draft):
                         dn.require_schedule_before_deadline(
-                            draft['publish_at'], draft['deadline_ad']
+                            draft['publish_at'], draft['deadline_ad'], draft.get('deadline_time')
                         )
             except Exception as e:
                 await self.answer_callback(cq['id'], str(e)[:180])
@@ -1153,8 +1180,8 @@ class TgMenu:
             try:
                 dn.require_future_publish_at(datetime.fromisoformat(publish_at))
                 n = store.get_manual(nid)
-                if n and n.get('category') == 'assignment' and n.get('deadline_ad'):
-                    dn.require_schedule_before_deadline(publish_at, n['deadline_ad'])
+                if n and dn.has_deadline(n):
+                    dn.require_schedule_before_deadline(publish_at, n['deadline_ad'], n.get('deadline_time'))
             except Exception as e:
                 await self.send(chat_id, f'{e}\nTry again.')
                 sess['step'] = 'edit_schedule_input'
@@ -1200,7 +1227,7 @@ class TgMenu:
                 [{'text': 'Title', 'callback_data': 'edit:field:title'}],
                 [{'text': 'Body', 'callback_data': 'edit:field:body'}],
             ]
-            if n.get('category') == 'assignment':
+            if n.get('category') in dn.DEADLINE_CATEGORIES:
                 buttons.append([{'text': 'Deadline', 'callback_data': 'edit:field:deadline'}])
             if n.get('status') == 'scheduled':
                 buttons.append([{'text': 'Post time', 'callback_data': 'edit:field:schedule'}])
@@ -1220,8 +1247,8 @@ class TgMenu:
             if not n:
                 await self.send(chat_id, 'Not found.')
                 return
-            if field == 'deadline' and n.get('category') != 'assignment':
-                await self.send(chat_id, 'Only assignments have deadlines.')
+            if field == 'deadline' and n.get('category') not in dn.DEADLINE_CATEGORIES:
+                await self.send(chat_id, 'Only assignments and general notices have deadlines.')
                 return
             if field == 'schedule' and n.get('status') != 'scheduled':
                 await self.send(chat_id, 'Only scheduled (not yet posted) notices.')
@@ -1305,6 +1332,19 @@ class TgMenu:
         if sess['draft'].get('category') == 'assignment':
             sess['step'] = 'create_deadline_cal'
             await self._ask_calendar(chat_id)
+        elif sess['draft'].get('category') == 'general':
+            sess['step'] = 'create_deadline_ask'
+            await self.send(
+                chat_id,
+                'Add a deadline?',
+                reply_markup=inline([
+                    [
+                        {'text': 'Yes', 'callback_data': 'create:dl:add'},
+                        {'text': 'No / skip', 'callback_data': 'create:dl:skip'},
+                    ],
+                    [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
+                ]),
+            )
         else:
             sess['step'] = 'create_preview'
             await self._show_preview(chat_id, sess)
@@ -1477,6 +1517,10 @@ class TgMenu:
             await self._handle_deadline_input(chat_id, sess, txt, mode='create')
             return
 
+        if step in ('create_time_input', 'edit_time_input') and txt:
+            await self._handle_time_input(chat_id, sess, txt, mode=step.split('_')[0])
+            return
+
         if step == 'edit_wait_title' and txt:
             nid = sess['draft']['id']
             store.update_manual(nid, title=txt)
@@ -1528,9 +1572,6 @@ class TgMenu:
             else:
                 ad = dn.ad_from_input(txt)
             dn.require_future_deadline(ad)
-            pub = sess['draft'].get('publish_at')
-            if pub:
-                dn.require_schedule_before_deadline(pub, ad.isoformat())
             bs_str = dn.ad_to_bs_str(ad)
         except Exception as e:
             await self.send(chat_id, f'Invalid date: {e}\nTry again (YYYY-MM-DD):')
@@ -1543,9 +1584,34 @@ class TgMenu:
 
         sess['draft']['deadline_ad'] = ad.isoformat()
         sess['draft']['deadline_bs'] = bs_str
-        pair = dn.format_deadline_pair(ad)
+        sess['step'] = f'{mode}_time_input'
+        await self.send(
+            chat_id,
+            'Deadline time (Nepal time)?\nType it like 5pm, 5:30 PM or 17:00,\nor use the default.',
+            reply_markup=inline([
+                [{'text': '🕐 Use 11:59 PM', 'callback_data': f'{mode}:dltime:default'}],
+                [{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}],
+            ]),
+        )
 
-        prefix = 'create' if mode == 'create' else 'edit'
+    async def _handle_time_input(self, chat_id, sess, txt, mode):
+        ad = sess['draft'].get('deadline_ad')
+        try:
+            at = dn.parse_deadline_time(txt)
+            dn.require_future_deadline_time(ad, at)
+            pub = sess['draft'].get('publish_at')
+            if pub:
+                dn.require_schedule_before_deadline(pub, ad, at)
+        except Exception as e:
+            await self.send(
+                chat_id,
+                f'Invalid: {e}\nType another time, or Cancel.',
+                reply_markup=inline([[{'text': '❌ Cancel', 'callback_data': 'menu:cancel'}]]),
+            )
+            return
+        sess['draft']['deadline_time'] = at
+        pair = dn.format_deadline_pair(date.fromisoformat(ad), at)
+        prefix = mode
         sess['step'] = f'{mode}_deadline_confirm'
         await self.send(
             chat_id,

@@ -960,6 +960,8 @@ async def scheduled_loop():
     while True:
         try:
             if menu:
+                # every 30s so a deadline with a set time expires on time
+                await menu.apply_expirations()
                 n = await menu.publish_due_scheduled()
                 if n:
                     print(f'[SCHEDULE] published {n} notice(s)')
@@ -984,7 +986,7 @@ async def routine_loop():
 
 
 async def reminder_loop():
-    """At 6:00 PM Nepal time, remind about assignments due today + tomorrow. No catch-up if missed."""
+    """At 6:00 PM Nepal time, remind about deadlines today + tomorrow. No catch-up if missed."""
     print('[REMINDER] Deadline reminder loop started (6:00 PM NPT)')
     while True:
         try:

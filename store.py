@@ -101,11 +101,47 @@ def load_reminder_posts():
     return {}
 
 
+_REMINDER_KEYS = ('notice_ids', 'telegram', 'discord')
+KEEP_EARLIER_REMINDERS = 20
+
+
+def _reminder_entry(st):
+    return {k: st[k] for k in _REMINDER_KEYS if k in st}
+
+
 def save_reminder_posts(data):
     st = dict(data or {})
     if not st.get('day'):
         st['day'] = reminder_day() or ''
+    # keep older reminders' message ids so they can still be deleted later
+    old = _load_reminder_state()
+    earlier = list(old.get('earlier') or [])
+    if old.get('notice_ids'):
+        earlier.append(_reminder_entry(old))
+    if earlier:
+        st['earlier'] = earlier[-KEEP_EARLIER_REMINDERS:]
     _save_reminder_state(st)
+
+
+def pop_finished_reminders(is_finished):
+    """Remove and return reminders whose listed notices are all finished."""
+    st = _load_reminder_state()
+    done, earlier = [], []
+    for entry in st.get('earlier') or []:
+        ids = entry.get('notice_ids') or []
+        (done if ids and all(map(is_finished, ids)) else earlier).append(entry)
+    ids = st.get('notice_ids') or []
+    if ids and all(map(is_finished, ids)):
+        done.append(_reminder_entry(st))
+        for key in _REMINDER_KEYS:
+            st.pop(key, None)
+    if done:
+        if earlier:
+            st['earlier'] = earlier
+        else:
+            st.pop('earlier', None)
+        _save_reminder_state(st)
+    return done
 
 
 def clear_reminder_posts():
